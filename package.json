@@ -33,7 +33,7 @@
     "prepare": "tsc",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test \"dist/**/*.test.js\""
+    "test": "tsc && node --test $(find dist -name \"*.test.js\")"
   },
   "keywords": [
     "user-testing",

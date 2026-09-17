@@ -21,7 +21,7 @@ logged in (`claude`, `opencode`, or `codex`).
 
 ```bash
 npm run typecheck    # tsc --noEmit
-npm test             # tsc, then node --test dist/**/*.test.js
+npm test             # tsc, then node --test on every dist/**/*.test.js (listed by find, so Node 20 works)
 ```
 
 Run both before opening a PR. `dist/` is build output — never edit it by

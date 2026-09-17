@@ -704,7 +704,7 @@ Seventeen things that will bite you. Most were paid for once already — see
 
 ```bash
 npm run typecheck    # tsc --noEmit
-npm test             # tsc, then node --test dist/**/*.test.js
+npm test             # tsc, then node --test on every dist/**/*.test.js (listed by find, so Node 20 works)
 
 node scripts/verify-frames.mjs   # iframe measurement, needs a build + Chromium
 ```
