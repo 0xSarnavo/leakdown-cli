@@ -74,5 +74,7 @@ export function exitSummary(exit: ExitReason): string {
       return `abandoned: "${exit.reason}" (wanted answered: "${exit.question}")`;
     case "guardrail":
       return `terminated by guardrail: ${exit.detail}`;
+    case "couldnotrun":
+      return `could not run (our side, not the site's): ${exit.detail}`;
   }
 }

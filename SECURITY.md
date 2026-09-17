@@ -20,6 +20,8 @@ until it is fixed.
 
 ## What the tool does on your behalf, and its limits
 
+- Run it only against sites you own or have written permission to test. It
+  creates accounts, submits forms and triggers whatever those trigger.
 - A guard refuses payments, booking confirmations and third-party sign-in at
   the action, on any page. It matches labels and is best effort. Do not point
   the tool at a live checkout and rely on it never buying anything.
@@ -30,8 +32,11 @@ until it is fixed.
   you do not control as untrusted input.
 - Verification emails go to throwaway addresses on a domain you configure.
   Whoever controls that mailbox can read them.
-- Reports and recordings stay on the machine that ran them. Nothing is sent to
-  the project's website by the CLI.
+- Reports and recordings stay on the machine that ran them. A plain run sends
+  nothing anywhere but the target site and your AI CLI. The operator-only
+  `--orders` / `--order` commands are the exception: they read requests from
+  the project's website, post an order's status back, and email the PDF report
+  from the configured mailbox.
 
 ## Out of scope
 

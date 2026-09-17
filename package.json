@@ -1,6 +1,6 @@
 {
   "name": "leakdown",
-  "version": "0.5.0",
+  "version": "0.7.0",
   "description": "Synthetic client agents that walk through any website's onboarding like real humans, think out loud, and report where and why they drop off.",
   "type": "module",
   "bin": {
@@ -22,6 +22,7 @@
   "files": [
     "dist",
     "!dist/**/*.test.js",
+    "!dist/**/*.tsbuildinfo",
     "README.md",
     "LICENSE",
     "SECURITY.md",
@@ -29,11 +30,10 @@
   ],
   "scripts": {
     "build": "tsc",
+    "prepare": "tsc",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test \"dist/**/*.test.js\"",
-    "site": "node website/server.mjs",
-    "site:build": "node website/generate.mjs"
+    "test": "tsc && node --test \"dist/**/*.test.js\""
   },
   "keywords": [
     "user-testing",

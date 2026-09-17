@@ -1,0 +1,19 @@
+# An approved flow, written by hand. Copy, rename, edit. Run it with:
+#   leakdown <url> --flow-file example-signup --goal "sign up" --yes
+# Check it without a browser:  leakdown --validate-flow flows/example-signup.yaml
+# Full format: the comment at the top of src/site/flow-load.ts.
+
+name: Signup to first project
+intent: sign up with email and reach the first empty project
+
+steps:
+  - found the signup form
+  - name: submitted email and password
+    expect: "Check your inbox"          # page text that proves the step
+  - received the verification email
+  - name: saw the dashboard
+    expect: "New project"
+
+# Where an approved run may stop: the session ends COMPLETED as soon as
+# this step's `expect` text is on screen. Delete the line to score all steps.
+stop_after: 4

@@ -8,6 +8,7 @@ import { FlowScoreSchema, type FlowScore } from "../site/flow.js";
 import { broken, guardedSurfaces, loadMap, unreached } from "../site/map.js";
 import { fmtDuration, journeySeconds, watermark } from "./report.js";
 import { collectSightings, replicationTable } from "./replication.js";
+import { confidenceInterval, lift, overlap, strength } from "./stats.js";
 import { RUNS_ROOT, siteSlug } from "../runs.js";
 export { siteSlug };
 
@@ -19,6 +20,8 @@ export interface SessionMeta {
   date?: string;
   flow?: FlowScore | null;
   mailProbe?: { ok: boolean; latencySeconds: number | null; at: string } | null;
+  /** `--variant` label; absent on a plain run */
+  variant?: string;
 }
 
 const MetaSchema = z.object({
@@ -29,6 +32,7 @@ const MetaSchema = z.object({
   // older sessions have no flow field; a malformed one degrades to "unscored"
   flow: FlowScoreSchema.nullish().catch(null),
   mailProbe: z.object({ ok: z.boolean(), latencySeconds: z.number().nullable(), at: z.string() }).nullish().catch(null),
+  variant: z.string().optional().catch(undefined),
 });
 
 /**
@@ -103,8 +107,9 @@ export function generateAggregate(dirs: string[]): string {
   const done = sessions.filter((s) => s.meta.exit.kind === "completed");
   const left = sessions.filter((s) => s.meta.exit.kind === "abandoned");
   const guard = sessions.filter((s) => s.meta.exit.kind === "guardrail");
+  const blocked = sessions.filter((s) => s.meta.exit.kind === "couldnotrun").length;
   // patience running out is the prospect's own budget spent on the site — a real signal;
-  // the rest (stuck loop, clock, brain failure) is the harness and says nothing about the site
+  // the rest (stuck loop, clock) is the harness and says nothing about the site
   const tired = guard.filter((s) => /patience/i.test((s.meta.exit as { detail: string }).detail)).length;
   const stopped = guard.length - tired;
   L.push(`# ${site} — what ${sessions.length} simulated prospects hit`, "");
@@ -112,7 +117,7 @@ export function generateAggregate(dirs: string[]): string {
   const mailBad = sessions.some((s) => s.meta.mailProbe?.ok === false) || existsSync(`${RUNS_ROOT}/${site}/MAIL-WARNING.md`);
   if (mailBad) L.push(`> ⚠ **Email verdicts unverified.** Our own mailbox probe failed around this run. Anything below about "the email never came" may be our fault, not the site's. See MAIL-WARNING.md, run \`--mailtest\`.`, "");
   L.push(`## The one number`, "");
-  L.push(`**${done.length} of ${sessions.length} completed their goal.** ${left.length} walked out with a reason.${tired ? ` ${tired} ran out of patience still trying.` : ""}${stopped ? ` ${stopped} were stopped by the harness (stuck loop, clock, brain failure) — those say nothing about the site.` : ""}`, "");
+  L.push(`**${done.length} of ${sessions.length} completed their goal.** ${left.length} walked out with a reason.${tired ? ` ${tired} ran out of patience still trying.` : ""}${stopped ? ` ${stopped} were stopped by the harness (stuck loop, clock) — those say nothing about the site.` : ""}${blocked ? ` ${blocked} could not run at all (unreachable page, model down, setup error) — our side, not evidence about the site.` : ""}`, "");
 
   // a persona run more than once: say how much its runs agree, so one wandering
   // edge run is read as one run (retest: hot 3.8/4 stable, edge 2.5/4)
@@ -157,6 +162,7 @@ export function generateAggregate(dirs: string[]): string {
       const quote = (best.meta.exit as { reason: string }).reason;
       const last = best.events.slice(-2);
       L.push(`### ${i + 1}. \`${page}\` — ${hits.length} of ${sessions.length} walked out here`, "");
+      L.push(`**How sure:** ${strength(hits.length, sessions.length)} — the interval is what a count this small can support.`, "");
       L.push(`**Who:** ${who}`, "");
       L.push(`**In their words:** "${cell(quote, 320)}"`, "");
       L.push(`**Check it yourself:** open \`${page}\`. Right before leaving they were thinking: ${last.map((e) => `"${cell(e.decision.thought, 160)}" → ${describe(e.decision.action)}`).join("; then ")}.`, "");
@@ -198,7 +204,7 @@ export function generateAggregate(dirs: string[]): string {
   const once = rows.filter((r) => r.sessions === 1);
   if (replicated.length) {
     L.push(`**Element refs cited by more than one session** (run \`--fix\` first if empty):`, "");
-    for (const r of replicated.slice(0, 10)) L.push(`- \`${r.ref}\` — ${r.sessions} sessions, ${r.models.length} model(s)`);
+    for (const r of replicated.slice(0, 10)) L.push(`- \`${r.ref}\` — ${strength(r.sessions, sessions.length)}, ${r.models.length} model(s)`);
     L.push("");
   }
   if (once.length) {
@@ -247,9 +253,62 @@ export function generateAggregate(dirs: string[]): string {
       L.push(`**Pages no prospect found:** ${missed.length} of ${map.pages.length} mapped (${[...kinds.entries()].map(([k, n]) => `${k} ${n}`).join(", ")}). List in DETAIL.md.`, "");
     }
   }
+  L.push(...renderVariants(sessions));
   L.push(watermark(site));
   return L.join("\n");
 }
+
+type Loaded = ReturnType<typeof loadSessions>;
+
+/** Someone who gave up on the site: walked out, or spent all their patience trying. */
+const leaked = (s: Loaded[number]) =>
+  s.meta.exit.kind === "abandoned" || (s.meta.exit.kind === "guardrail" && /patience/i.test(s.meta.exit.detail));
+
+/**
+ * A/B: the same personas under two `--variant` labels. Rendered only when at
+ * least two variants each have a session. Exactly two are compared; more are
+ * listed. Could-not-run sessions are left out of every rate — they say nothing.
+ */
+export function renderVariants(sessions: Loaded): string[] {
+  const byVariant = new Map<string, Loaded>();
+  for (const s of sessions) if (s.meta.variant) byVariant.set(s.meta.variant, [...(byVariant.get(s.meta.variant) ?? []), s]);
+  if (byVariant.size < 2) return [];
+  const rows = [...byVariant.entries()].map(([variant, ss]) => {
+    const ran = ss.filter((s) => s.meta.exit.kind !== "couldnotrun");
+    return { variant, n: ran.length, hits: ran.filter(leaked).length, done: ran.filter((s) => s.meta.exit.kind === "completed").length, blocked: ss.length - ran.length };
+  });
+  // leakiest first: the highest share of visitors who gave up
+  rows.sort((a, b) => (b.n ? b.hits / b.n : 0) - (a.n ? a.hits / a.n : 0));
+  const L: string[] = [`## Variants compared (${rows.length})`, ""];
+  L.push(`Same personas, different experience. "Leaked" = walked out or ran out of patience; the interval is what a count this small can support.`, "");
+  L.push(`| variant | sessions | completed | leaked | how sure |`, `|---|---|---|---|---|`);
+  for (const r of rows) L.push(`| \`${r.variant}\` | ${r.n}${r.blocked ? ` (+${r.blocked} could not run)` : ""} | ${r.done} | ${r.hits} | ${strength(r.hits, r.n)} |`);
+  L.push("");
+  const [a, b] = rows;
+  const diff = Math.round(lift(b, a) * 100);
+  if (a.n < 3 || b.n < 3) L.push(`**Verdict:** too few sessions to call — run at least 3 per variant.`, "");
+  else if (overlap(a, b)) L.push(`**Verdict:** no meaningful difference between \`${a.variant}\` and \`${b.variant}\` — the intervals overlap.`, "");
+  else L.push(`**Verdict:** \`${a.variant}\` leaks more — ${diff} points more of its visitors gave up than in \`${b.variant}\` (${pct(confidenceInterval(a.hits, a.n))} vs ${pct(confidenceInterval(b.hits, b.n))}).`, "");
+  // where each variant lost people, side by side
+  const pages = new Map<string, Map<string, number>>();
+  for (const [variant, ss] of byVariant)
+    for (const s of ss.filter(leaked)) {
+      const page = hostPath(s.events.at(-1)?.url ?? s.meta.url);
+      const m = pages.get(page) ?? new Map<string, number>();
+      m.set(variant, (m.get(variant) ?? 0) + 1);
+      pages.set(page, m);
+    }
+  if (pages.size) {
+    L.push(`**Where they gave up, per variant:**`, "");
+    for (const [page, m] of [...pages.entries()].sort((x, y) => sum(y[1]) - sum(x[1])))
+      L.push(`- \`${page}\` — ${rows.map((r) => `${r.variant} ${m.get(r.variant) ?? 0}/${r.n}`).join(", ")}`);
+    L.push("");
+  }
+  return L;
+}
+
+const sum = (m: Map<string, number>) => [...m.values()].reduce((a, b) => a + b, 0);
+const pct = ([lo, hi]: [number, number]) => `${Math.round(lo * 100)}–${Math.round(hi * 100)}%`;
 
 function describe(a: StepEvent["decision"]["action"]): string {
   switch (a.type) {
@@ -279,7 +338,7 @@ export function generateDetail(dirs: string[]): string {
   lines.push("");
 
   // verdict summary
-  const byKind = { completed: 0, abandoned: 0, guardrail: 0 };
+  const byKind = { completed: 0, abandoned: 0, guardrail: 0, couldnotrun: 0 };
   for (const s of sessions) byKind[s.meta.exit.kind]++;
   lines.push(`## Verdict Summary`);
   lines.push("");
@@ -288,6 +347,7 @@ export function generateDetail(dirs: string[]): string {
   lines.push(`| ✅ Completed | ${byKind.completed} |`);
   lines.push(`| ❌ Abandoned | ${byKind.abandoned} |`);
   lines.push(`| ⚠️ Guardrail | ${byKind.guardrail} |`);
+  if (byKind.couldnotrun) lines.push(`| ⏸ Could not run (our side, not the site) | ${byKind.couldnotrun} |`);
   lines.push("");
 
   // flow funnel: how far along the tested flow each simulated prospect got.
@@ -418,6 +478,7 @@ export function generateDetail(dirs: string[]): string {
     lines.push("");
   }
 
+  lines.push(...renderVariants(sessions));
   lines.push(watermark(siteSlug(sessions[0].meta.url)));
   return lines.join("\n");
 }
@@ -430,6 +491,8 @@ function verdictIcon(exit: ExitReason): string {
       return "❌ abandoned";
     case "guardrail":
       return "⚠️ guardrail";
+    case "couldnotrun":
+      return "⏸ could not run";
   }
 }
 

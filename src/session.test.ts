@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
-import { mergeInbox, stuckPattern } from "./session.js";
+import { checkAssertions, goalExitCode, mergeInbox, stuckPattern } from "./session.js";
 import type { StepEvent } from "./types.js";
 
 /**
@@ -131,5 +131,57 @@ describe("stuckPattern — scrolling down a long page is not a loop", () => {
 
   it("treats unmeasured scrolls as it always did, so old sessions read the same", () => {
     assert.ok(stuckPattern(trail("scroll:down", "scroll:down", "scroll:down")));
+  });
+});
+
+describe("checkAssertions", () => {
+  const page = `- heading "Your bag"\n- text: Subtotal $120.00\n- text: "Discount SAVE20 applied"\n- text: Total: $120.00\n- button "Pay now"`;
+
+  it("passes when every expected value is somewhere on the page", () => {
+    const r = checkAssertions([{ label: "discount", expected: "SAVE20" }, { label: "total", expected: "$120.00" }], page);
+    assert.ok(r.every((a) => a.ok));
+  });
+
+  it("quotes the line that mentions the label when the value is missing", () => {
+    const [r] = checkAssertions([{ label: "total", expected: "$96.00" }], page);
+    assert.equal(r.ok, false);
+    assert.match(r.found, /Total: \$120\.00/);
+  });
+
+  it("says so when nothing on the page mentions the label", () => {
+    const [r] = checkAssertions([{ label: "shipping", expected: "free" }], page);
+    assert.equal(r.ok, false);
+    assert.match(r.found, /nothing mentioning "shipping"/);
+  });
+
+  it("caps the quoted line at 160 characters so a wall of text cannot flood the report", () => {
+    const long = `- text: total ${"x".repeat(500)}`;
+    const [r] = checkAssertions([{ label: "total", expected: "$1" }], long);
+    assert.ok(r.found.length <= 163, `found was ${r.found.length} chars`);
+  });
+
+  it("ignores whitespace differences, since snapshots wrap text", () => {
+    const [r] = checkAssertions([{ label: "total", expected: "Total:   $120.00" }], page);
+    assert.ok(r.ok);
+  });
+});
+
+describe("goalExitCode", () => {
+  it("is 0 only when every session completed", () => {
+    assert.equal(goalExitCode(["completed", "completed"], 2), 0);
+  });
+
+  it("is 1 when the site failed anybody, even if others could not run", () => {
+    assert.equal(goalExitCode(["completed", "abandoned"], 2), 1);
+    assert.equal(goalExitCode(["guardrail", "couldnotrun"], 2), 1);
+  });
+
+  it("is 2 when nothing failed but something could not run — infra, not the app", () => {
+    assert.equal(goalExitCode(["completed", "couldnotrun"], 2), 2);
+    assert.equal(goalExitCode(["couldnotrun"], 1), 2);
+  });
+
+  it("is 2 when a session vanished without any verdict", () => {
+    assert.equal(goalExitCode(["completed"], 2), 2);
   });
 });

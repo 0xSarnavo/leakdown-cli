@@ -24,10 +24,15 @@ Shipped and not up for renegotiation without a reason written into DECISIONS.md.
 | Temperature is prior knowledge | cold knows nothing, warm the arrival context, hot the specifics |
 | A persona sees one viewport | plus a headings outline; scrolling costs no patience |
 | Sessions are immutable evidence | reports and expert advice regenerate from them |
-| Ephemeral mailboxes | OTP codes and magic links, per run, destroyed after |
+| Ephemeral mailboxes | OTP codes and magic links, per run, moved to Trash after (purged by the mail provider's own schedule) |
 | Brains | claude, opencode, codex — any brain, any stage |
 | Safety | payment and third-party auth, by action not URL. Best-effort, not a guarantee |
 | Expert panel | 7 experts, one `FIXES.md` per session |
+| Goal runs are checks | `--expect label=value` must be on the page for a completion to count; exit 0 pass, 1 the site failed somebody, 2 could not run (our side) |
+| Could-not-run is neutral | unreachable page, brain down, setup failure: its own verdict, never read as a guardrail or a drop-off |
+| Counts carry intervals | every wall and replicated ref: "3/5 sessions · 60% [23–88%]"; under 3 sessions, "too few to call" |
+| Flows you write | `flows/*.yaml`, validated with `--validate-flow`, run with `--flow-file`; a `stop_after` step with `expect` text ends the session COMPLETED |
+| A/B on one laptop | `--variant` per run, `--compare <site>` ranks two with intervals or says "no meaningful difference" |
 
 ## Next
 

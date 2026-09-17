@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { detectBrains } from "./brain/catalog.js";
+import { findFfmpeg } from "./browser/video.js";
 
 const STATE_FILE = ".leakdown-state.json";
 const STATE_MAX_AGE_MS = 7 * 24 * 3600_000; // re-verify weekly
@@ -256,6 +257,9 @@ export async function runDoctor(brainName = "claude", force = false): Promise<bo
   results.push(await checkMailLive());
 
   let allOk = true;
+  // informational, never a failure: without it sessions keep video.webm only
+  const ffmpeg = await findFfmpeg().catch(() => null);
+  console.log(`  ${ffmpeg ? "✓" : "·"} ffmpeg: ${ffmpeg ? `${ffmpeg} — sessions get a playable video.mp4` : "not found — sessions keep video.webm only (brew install ffmpeg)"}`);
   for (const r of results) {
     console.log(`  ${r.ok ? "✓" : "✗"} ${r.name}: ${r.detail}`);
     if (!r.ok) allOk = false;
@@ -265,7 +269,7 @@ export async function runDoctor(brainName = "claude", force = false): Promise<bo
     saveState(results);
     printQuickStart();
   } else {
-    console.error(`\n  ✗ Fix the ✗ items above, then run: leakdown doctor --force\n`);
+    console.error(`\n  ✗ Fix the ✗ items above, then run: leakdown --doctor --force\n`);
   }
   return allOk;
 }

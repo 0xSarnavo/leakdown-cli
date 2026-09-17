@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import type { Decision } from "../types.js";
 import { CURSOR_SCRIPT } from "./cursor.js";
+import { findFfmpeg, transcodeToMp4 } from "./video.js";
 
 /**
  * Pick the recording that is the actual journey.
@@ -81,6 +82,13 @@ export class BrowserDriver {
     this.browser = await chromium.launch({ headless: opts.headless });
     this.context = await this.browser.newContext({
       viewport,
+      // retina screenshots: 1x shots look soft on modern screens and in PDFs.
+      // Video is unaffected (recordVideo encodes at `size`, the CSS viewport).
+      // The persona reads these shots too, so this trades tokens for legibility.
+      deviceScaleFactor: 2,
+      // still CSS animations make recordings calmer and stop mid-animation
+      // screenshots from reading as broken pages
+      reducedMotion: "reduce",
       isMobile: !!opts.mobile,
       hasTouch: !!opts.mobile,
       userAgent: opts.mobile
@@ -141,21 +149,24 @@ export class BrowserDriver {
     }
     if (!ariaYaml.trim()) ariaYaml = "(page appears blank)";
 
-    const scrollY = await this.page
-      .evaluate(() => Math.round(window.scrollY))
-      .catch(() => 0);
-
-    this.lastVisibility = await this.measure(ariaYaml);
-    const layout = await this.page
-      .evaluate(() => ({
-        overflowX: document.documentElement.scrollWidth > window.innerWidth + 1,
-        viewportMeta: !!document.querySelector('meta[name="viewport"]'),
-      }))
-      .catch(() => ({ overflowX: false, viewportMeta: true }));
+    // one round trip for the page-level numbers, in parallel with the per-ref measurement — all read-only
+    const [visibility, layout] = await Promise.all([
+      this.measure(ariaYaml),
+      this.page
+        .evaluate(() => ({
+          scrollY: Math.round(window.scrollY),
+          overflowX: document.documentElement.scrollWidth > window.innerWidth + 1,
+          viewportMeta: !!document.querySelector('meta[name="viewport"]'),
+        }))
+        .catch(() => ({ scrollY: 0, overflowX: false, viewportMeta: true })),
+    ]);
+    this.lastVisibility = visibility;
+    const { scrollY, ...rest } = layout;
+    const layoutOnly = rest;
     const audit: PageAudit = {
       unnamed: unnamedControls(ariaYaml, this.lastVisibility),
       small: smallTargets(ariaYaml, this.lastVisibility),
-      ...layout,
+      ...layoutOnly,
     };
     return { ariaYaml, url: this.page.url(), visibility: this.lastVisibility, scrollY, audit };
   }
@@ -247,7 +258,10 @@ export class BrowserDriver {
   async screenshotPath(stepNumber: number): Promise<string> {
     const path = `${this.shotsDir}/step-${String(stepNumber).padStart(3, "0")}.png`;
     try {
-      await this.page.screenshot({ path, fullPage: false });
+      // crisp text, no caret lottery: webfonts swap mid-shot otherwise, and a
+      // blinking cursor lands randomly across evidence screenshots
+      await this.page.evaluate(() => document.fonts?.ready).catch(() => {});
+      await this.page.screenshot({ path, fullPage: false, caret: "hide" });
       return path;
     } catch {
       return "";
@@ -311,6 +325,13 @@ export class BrowserDriver {
         break; // complete / abandon handled by session loop
     }
 
+    // a scroll or a pause never navigates: a short settle for lazy content, not a
+    // network wait — networkidle never fires on pages with beacons, and a long page
+    // takes ~14 scrolls, which was up to 7s of waiting each (measured 2026-09-17)
+    if (a.type === "scroll" || a.type === "wait") {
+      await this.page.waitForTimeout(300);
+      return;
+    }
     // settle after navigation-triggering actions
     await this.page
       .waitForLoadState("domcontentloaded", { timeout: 15_000 })
@@ -330,9 +351,16 @@ export class BrowserDriver {
    * renders each produce their own file. The main journey is always the longest
    * one, so that is the file we keep; the rest are discarded. The winner is
    * *moved* rather than copied, so no duplicate is left behind.
+   *
+   * Playwright records VP8 `.webm`, which QuickTime and Safari refuse to open,
+   * so the winner is also transcoded to H.264 `.mp4` (faststart) beside it.
+   * No new dependency: system ffmpeg first, else the copy Playwright itself
+   * downloaded. No ffmpeg anywhere means `.webm` only — never a failed run.
+   *
+   * Returns which artifacts exist afterwards (both null when nothing recorded).
    */
-  async saveVideo(path: string) {
-    if (this.videoSaved || !this.videoDir) return;
+  async saveVideo(path: string): Promise<{ webm: string | null; mp4: string | null }> {
+    if (this.videoSaved || !this.videoDir) return { webm: null, mp4: null };
     this.videoSaved = true;
 
     // The journey is whatever page it ENDED on: popups are followed, and when
@@ -342,7 +370,7 @@ export class BrowserDriver {
     const journeyVideo = this.page?.video?.();
 
     await this.context?.close().catch(() => {}); // recordings finalize on context close
-    if (!existsSync(this.videoDir)) return;
+    if (!existsSync(this.videoDir)) return { webm: null, mp4: null };
 
     let saved = false;
     if (journeyVideo) {
@@ -362,12 +390,25 @@ export class BrowserDriver {
       if (main) {
         try {
           renameSync(main.file, path);
+          saved = true;
         } catch {
-          return; // cross-device or racing writer — leave the raw file rather than lose it
+          return { webm: null, mp4: null }; // cross-device or racing writer — leave the raw dir rather than lose it
         }
       }
     }
     rmSync(this.videoDir, { recursive: true, force: true });
+    if (!saved || !existsSync(path)) return { webm: null, mp4: null };
+
+    // playable copy; the webm is kept only when ffmpeg is nowhere to be found
+    // (the mp4 is 60% of its size and every player opens it — measured 2026-09-17)
+    const mp4 = path.replace(/\.webm$/, ".mp4");
+    const ffmpeg = await findFfmpeg().catch(() => null);
+    const playable = ffmpeg ? await transcodeToMp4(ffmpeg, path, mp4).catch(() => false) : false;
+    if (playable) {
+      rmSync(path, { force: true });
+      return { webm: null, mp4 };
+    }
+    return { webm: path, mp4: null };
   }
 
   /**

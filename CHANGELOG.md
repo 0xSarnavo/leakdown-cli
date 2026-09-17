@@ -6,6 +6,58 @@ tags `v<version>`, and publishes the same text as a GitHub Release.
 
 ## Unreleased
 
+## 0.7.0 — 2026-09-17
+
+**Goal tests can assert values.** `--expect "total=$96.00"` (repeatable, with
+`--goal`) makes a completion count only when the page really shows the value;
+the report's Assertions section quotes what it found instead.
+
+**"Could not run" is its own verdict.** An unreachable page, a model that stops
+answering, or a setup error now ends a session as *could not run* — a neutral
+section in `report.md`, its own count in `AGGREGATE.md`, `DETAIL.md` and
+`RUN.md` — instead of reading as a guardrail stop. `--goal` exit codes are now
+0 (all passed), 1 (a session failed on the site), 2 (could not run), so CI can
+tell the app from the infrastructure.
+
+**Write your own flows.** `flows/<id>.yaml` (or `runs/<site>/flows/`) holds a
+journey as ordered steps; `leakdown --validate-flow [file]` checks them without
+a browser and lists what is wrong, file by file. `leakdown <url> --flow-file <id>`
+runs against one: every session is scored step by step, and a `stop_after` step
+with `expect` text ends the session COMPLETED the moment that text is on screen.
+See `flows/example-signup.yaml`.
+
+**A/B on your laptop.** `--variant <slug>` labels a run ("control",
+"new-pricing"); run the same personas once per variant, then
+`leakdown --compare <site>` puts the newest run of each side by side in
+`runs/<site>/COMPARE.md`: sessions, completed, leaked, an interval per variant,
+where each lost people, and one verdict — which leaks more, or "no meaningful
+difference" when the intervals overlap. Plain runs are unchanged.
+
+**Ready for outside testers.** `leakdown --version`; a typo'd flag is now an
+error instead of being ignored (`--headles` used to run a headed browser).
+Every report and `meta.json` carries the version. After a report,
+`runs/<site>/VERDICTS.md` is written once with a `?:` line per wall for you to
+mark `real:` or `false:`. `--doctor` says whether `ffmpeg` was found. The
+persona rule now also forbids publishing, support chat and contacting third
+parties. `video.webm` is deleted once `video.mp4` exists (37% less disk per
+session). Scrolling no longer waits for the network to go idle — a long page
+is up to a minute faster per session. README says what is stored, how to delete
+it, and that you may only test sites you own or have permission to test.
+
+**Reports say how sure they are.** Every wall in `AGGREGATE.md` and every
+element ref cited by more than one session now carries its count with a 95%
+interval ("3/5 sessions · 60% [23–88%]"). Under three sessions it says "too
+few to call" instead of a number.
+
+## 0.6.0 — 2026-09-15
+
+**Sharper evidence: retina screenshots, calmer recordings, playable video, filmstrip.**
+Step screenshots are now retina (2560px) with settled webfonts and no cursor
+flicker; recordings run with reduced motion. Every session also saves
+`video.mp4` (plays in QuickTime/Safari — needs `ffmpeg` installed, else `.webm`
+as before) and `filmstrip.html` (every step with its thought, no video needed);
+`report.md` links both under Evidence.
+
 **Rebrand to Leakdown.** The bin is `leakdown` (was `client-simulator`).
 Env vars are `LEAKDOWN_*` — `LEAKDOWN_IMAP_HOST/USER/PASS`,
 `LEAKDOWN_MAIL_DOMAIN`, `LEAKDOWN_ORDERS_URL/TOKEN` — with the old

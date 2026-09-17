@@ -15,12 +15,15 @@ import {
 } from "./persona/load.js";
 import { generatePersonas } from "./persona/generate.js";
 import { stringify as stringifyYaml } from "yaml";
-import { runSession } from "./session.js";
-import { generateReport, journeySeconds } from "./log/report.js";
-import { generateAggregate, generateDetail, loadSessions } from "./log/aggregate.js";
-import { RUNS_ROOT, dirLabel, findSessionDirs, modelSlug, newRunDir, runDirOf, runDirs, seatOf, sessionPath, siteSlug, type Seat } from "./runs.js";
+import { goalExitCode, runSession } from "./session.js";
+import { tmpdir } from "node:os";
+import { VERSION } from "./version.js";
+import { findFfmpeg } from "./browser/video.js";
+import { generateFilmstrip, generateReport, journeySeconds, watermark } from "./log/report.js";
+import { generateAggregate, generateDetail, loadSessions, renderVariants } from "./log/aggregate.js";
+import { RUNS_ROOT, VARIANT_PATTERN, dirLabel, findSessionDirs, modelSlug, newRunDir, runDirOf, runDirs, seatOf, sessionPath, siteSlug, variantOf, type Seat } from "./runs.js";
 import { EXPERTS } from "./experts/index.js";
-import type { Brain, ExitReason, Persona, StepEvent } from "./types.js";
+import type { Assertion, AssertionResult, Brain, ExitReason, Persona, StepEvent } from "./types.js";
 import type { MailProvider, Mailbox, MailMessage } from "./mail/types.js";
 import { ImapProvider, type ImapConfig } from "./mail/imap.js";
 import { extractCodes, extractLinks } from "./mail/types.js";
@@ -43,7 +46,8 @@ import { analyticsPath, loadAnalytics, renderAnalytics } from "./site/analytics.
 import { htmlToPdf, packetFor, packetHtml } from "./log/pdf.js";
 import { getOrder, listOrders, mimeWithAttachment, renderOrders, setOrderStatus } from "./orders.js";
 import { collectSightings, replicationTable, topSessions } from "./log/replication.js";
-import { draftFlow, loadFlow, scoreFlow, type Flow } from "./site/flow.js";
+import { draftFlow, loadFlow, scoreFlow, type Flow, type FlowScore } from "./site/flow.js";
+import { FLOWS_DIR, loadFlowFile, renderFlowChecks, toFlow, validateFlow, validateFlowDir } from "./site/flow-load.js";
 
 const MAX_RUNS = 10;
 /** Stages, in the order they must run. `--stop <stage>` ends after one of these. */
@@ -185,7 +189,10 @@ function setupMail(): { provider: MailProvider } | null {
 }
 
 function printUsage() {
-  console.log(`leakdown — simulated prospects walk your signup and say where they gave up
+  console.log(`leakdown ${VERSION} — simulated prospects walk your signup and say where they gave up
+
+  Only run it against sites you own or have written permission to test. It creates
+  real accounts, triggers real emails and webhooks, and records what it sees.
 
   leakdown <url> --ladder --yes --headless   the full run, about an hour
   leakdown <url>                             a plain run, one model, menus for the rest
@@ -203,7 +210,7 @@ STAGES, in order:
   report    the report     -> runs/<site>/<date>/<time>/AGGREGATE.md (copied to runs/<site>/)
   fix       expert panel   -> FIXES.md per session
 
-  --ladder [--wide <spec>]    the measured fleet: haiku visits every persona, the
+  --ladder [--wide <spec>]    the full run: haiku visits every persona, the
                               replication filter picks the sessions that agree, sonnet
                               verifies those, opus re-walks the hardest persona and writes
                               its report. --wide "haiku:5,opencode/<model>:5" splits the sweep.
@@ -211,6 +218,13 @@ STAGES, in order:
   --flow "<intent>"           the flow to test, e.g. "signup through to the
                               dashboard" — checkpoints are drafted for review,
                               sessions are scored against them (runs/<site>/FLOW.md)
+  --flow-file <id|path>       a flow you wrote yourself (flows/<id>.yaml or
+                              runs/<site>/flows/): steps scored per session, and a
+                              stop_after step ends the run COMPLETED when its text
+                              shows. --validate-flow [file] checks flow files, no browser
+  --variant <slug>            A/B: label this run ("control", "new-pricing"); run the same
+                              personas once per variant, then --compare <site> ranks
+                              them — or says "no meaningful difference" when it is
   --plan                      re-read the site and rebuild its personas
   --no-map                    skip the re-crawl that checks whether the site changed
   --force                     regenerate outputs that are already up to date
@@ -219,11 +233,17 @@ WHO GOES IN:
   --persona <list>            explicit queue, e.g. cold,warm,hot (max 10)
   --random <n>                n prospects, chosen at random (max 10)
                               omit both and it offers the personas built for this site
+  --count <n>                 how many prospects the personas stage builds (2-10, default 10)
   --goal "<text>"             goal test: every queued persona gets this goal, and the
                               process exits 0 only if every session completes it —
                               fits CI ("log in and get an API key")
   --steps <n>                 step cap per session, 1-50 (with --goal; default is
                               each persona's own patience)
+  --expect "label=value"      with --goal, repeatable: the page must show the value
+                              before a completion counts ("total=$96.00"); the
+                              report quotes what it found instead. Exit codes:
+                              0 all passed, 1 a session failed, 2 could not run
+                              (unreachable URL, brain down — not the site's fault)
 
 HOW IT RUNS:
   --brain <claude|opencode|codex>   which AI CLI plays the client
@@ -238,6 +258,7 @@ HOW IT RUNS:
                               browser + AI CLI per persona; omit both and it asks
   --mobile                    phone viewport (390x844, touch) instead of desktop
   --yes                       never prompt; take the default for every question
+  --version                   print the version (put it in bug reports)
 
 ON ITS OWN — <what> is a site name (its newest run), site/date/time, or a folder:
   --history [site]            every run, one line each: date, one number, seats
@@ -278,6 +299,8 @@ interface CommonArgs {
   time?: number;
   /** the flow to test, e.g. "signup through to the dashboard" */
   flow?: string;
+  /** an operator-written flow: id from flows/ or a YAML path (skips the AI draft and its review gate) */
+  flowFile?: string;
   /** force the site read + persona rebuild on an already-tested site */
   plan?: boolean;
   /** set once the picker has run, so chained stages never ask twice */
@@ -290,6 +313,8 @@ interface CommonArgs {
   goal?: string;
   /** step cap per session (overrides patience_steps) */
   steps?: number;
+  /** goal test: values the page must show before a completion counts (`--expect total=$96.00`) */
+  expect?: Assertion[];
   /** never prompt — take the default for every question */
   yes?: boolean;
   /** the ladder's wide sweep: "haiku" or "haiku:5,opencode/muse-spark-1.3-contributor-free:5" */
@@ -302,6 +327,8 @@ interface CommonArgs {
   seat?: Seat;
   /** skip the per-run re-crawl when a map already exists */
   noMap?: boolean;
+  /** A/B label: tags every session and the run folder (<time>--<variant>); `--compare <site>` ranks them */
+  variant?: string;
 }
 
 function parseCommon(argv: string[]): CommonArgs {
@@ -329,6 +356,15 @@ function parseCommon(argv: string[]): CommonArgs {
       args.time = t;
     }
     else if (a === "--flow") args.flow = value(++i, a);
+    else if (a === "--flow-file") args.flowFile = value(++i, a);
+    else if (a === "--variant") {
+      const v = value(++i, a);
+      if (!VARIANT_PATTERN.test(v)) {
+        console.error(`--variant takes a slug: lowercase letters, digits, dashes, up to 40 characters. Got "${v}".`);
+        process.exit(1);
+      }
+      args.variant = v;
+    }
     else if (a === "--wide") args.wide = value(++i, a);
     else if (a === "--goal") {
       const g = value(++i, a).trim();
@@ -337,6 +373,17 @@ function parseCommon(argv: string[]): CommonArgs {
         process.exit(1);
       }
       args.goal = g;
+    }
+    else if (a === "--expect") {
+      const raw = value(++i, a);
+      const eq = raw.indexOf("=");
+      const label = raw.slice(0, eq).trim();
+      const expected = raw.slice(eq + 1).trim();
+      if (eq < 1 || !label || !expected || raw.length > 200) {
+        console.error(`--expect takes label=value, e.g. --expect "total=$96.00". Got "${raw}".`);
+        process.exit(1);
+      }
+      (args.expect ??= []).push({ label, expected });
     }
     else if (a === "--steps") {
       const n = parseInt(value(++i, a), 10);
@@ -503,6 +550,17 @@ async function prepareFlow(
   common: CommonArgs,
   brain: Brain & { ask?(prompt: string): Promise<string> },
 ): Promise<Flow | null> {
+  // an operator-written flow needs no draft and no review — they wrote it
+  if (common.flowFile) {
+    const check = loadFlowFile(common.flowFile, url);
+    if (!check.ok) {
+      console.error(`  --flow-file: ${check.file} — ${check.error}`);
+      process.exit(1);
+    }
+    const flow = toFlow(check.flow);
+    console.log(`\n  flow: ${check.file} (${flow.checkpoints.length} steps${flow.stop ? `, stops after "${flow.stop.label}"` : ""})\n`);
+    return flow;
+  }
   const existing = loadFlow(url);
   if (existing && !common.plan) return existing;
 
@@ -804,7 +862,7 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
 
   // dirs are minted before anyone launches: sessionPath's same-second suffix
   // check is exists-then-create, which two concurrent starts would race
-  common.runDir ??= newRunDir(url);
+  common.runDir ??= newRunDir(url, new Date(), RUNS_ROOT, common.variant);
   const runs = personaIds.map((pid, i) => {
     const sessionDir = sessionPath(common.runDir!, common.seat ?? "wide", common.model ?? common.brain, pid);
     mkdirSync(`${sessionDir}/shots`, { recursive: true });
@@ -812,7 +870,7 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
   });
 
   let done = 0;
-  let goalPasses = 0;
+  const exits: ExitReason["kind"][] = [];
   // a brain that fails before the first step is down (usage limit, auth, outage),
   // and the next persona will not fare better — eight sessions once burned through
   // a 30-minute limit in minutes, each filed as its own failure
@@ -823,6 +881,16 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
       rmSync(sessionDir, { recursive: true, force: true });
       return;
     }
+    const tag = tagged ? pid : undefined;
+
+    // one provider per agent — an IMAP connection is stateful, and concurrent
+    // polls through a shared one interleave on a single socket
+    const mail = mailCfg ? new ImapProvider(mailCfg) : undefined;
+    let box: Mailbox | undefined;
+
+    // session state lives at runOne scope so finally can write the report
+    // AFTER the video finalizes — the Evidence section names files that only
+    // exist once saveVideo() has run
     const base: Persona = registry.personas[pid];
     // A goal test asks "did it work", not "how did it feel" — same persona,
     // its goal swapped for the asserted one. verifyGoal already judges
@@ -830,15 +898,16 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
     // a 7-checkpoint flow (signup, email, workspace, survey…) is not doable in a hot
     // persona's 10 steps; both hot personas ran out today while doing the right thing
     const forFlow = flow ? Math.min(50, flow.checkpoints.length * 2 + 2) : 0;
+    const expectLine = common.expect?.length
+      ? ` You expect to see: ${common.expect.map((a) => `${a.label} = ${a.expected}`).join(", ")}.`
+      : "";
     const persona: Persona = common.goal
-      ? { ...base, goal: common.goal, patience_steps: common.steps ?? base.patience_steps }
+      ? { ...base, goal: common.goal + expectLine, patience_steps: common.steps ?? base.patience_steps }
       : { ...base, patience_steps: Math.max(base.patience_steps, forFlow) };
-    const tag = tagged ? pid : undefined;
-
-    // one provider per agent — an IMAP connection is stateful, and concurrent
-    // polls through a shared one interleave on a single socket
-    const mail = mailCfg ? new ImapProvider(mailCfg) : undefined;
-    let box: Mailbox | undefined;
+    let events: StepEvent[] = [];
+    let exit: ExitReason | undefined;
+    let flowScore: FlowScore | null = null;
+    let asserted: AssertionResult[] | undefined;
 
     // fresh brain per persona — a shared one would carry the previous
     // persona's whole conversation into this one's first impression
@@ -858,10 +927,10 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
         mobile: common.mobile,
         videoDir: `${sessionDir}/.video`,
       });
-      let events: StepEvent[] = [];
-      let exit: ExitReason;
+      // events, exit and flowScore live at runOne scope (declared above) so
+      // finally can write the report after the video finalizes
       try {
-        ({ events, exit } = await runSession({
+        ({ events, exit, assertions: asserted } = await runSession({
           url,
           persona,
           brain,
@@ -872,15 +941,21 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
           arrival: arrivalFor(url, persona.temperature) ?? undefined,
           timeBudgetMinutes: common.time,
           tag,
+          assertions: common.expect,
+          stopWhen: flow?.stop,
         }));
       } catch (e) {
+        // goto timeout, dead preview, driver crash — our side, not the site's
         const detail = (e as Error).message.split("\n")[0];
-        console.log(`\n  ${tag ? `[${tag}] ` : ""}session failed: ${detail}`);
-        exit = { kind: "guardrail", detail: `Session could not run: ${detail}` };
+        console.log(`\n  ${tag ? `[${tag}] ` : ""}session could not run: ${detail}`);
+        exit = { kind: "couldnotrun", detail: `Session could not run: ${detail}` };
       }
 
       // one un-retried call per session: which flow checkpoints did it reach?
-      const flowScore = flow && events.length > 0 ? await scoreFlow(flow, events, brain) : null;
+      flowScore = flow && events.length > 0 ? await scoreFlow(flow, events, brain) : null;
+      // the stop point is mechanical evidence — it outranks the scorer's reading of the trail
+      if (flowScore && flow?.stop && exit.kind === "completed" && exit.summary.startsWith("Reached the flow's stop point"))
+        flowScore[flow.stop.index] = { ...flowScore[flow.stop.index], reached: true, note: `page showed "${flow.stop.text}"` };
       if (flowScore) {
         console.log(
           `  ${tag ? `[${tag}] ` : ""}flow: ${flowScore.filter((c) => c.reached).length}/${flowScore.length} checkpoints reached`,
@@ -888,49 +963,75 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
       }
 
       if (mail?.lastInboundAt) inboundSeen = true;
-      if (exit.kind === "guardrail" && events.length === 0 && /Brain .* failed at step 1/.test(exit.detail)) {
+      if (exit.kind === "couldnotrun" && events.length === 0 && /Brain .* failed at step 1/.test(exit.detail)) {
         brainDown = true;
         const reply = exit.detail.match(/last reply: "(.{0,160})/)?.[1];
         console.log(`\n  ⛔ the brain is not answering${reply ? ` — it said: "${reply}…"` : ""}.\n  A subscription usage limit looks exactly like this; wait for it to reset and rerun the same command.\n`);
       }
-      writeFileSync(
-        `${sessionDir}/report.md`,
-        generateReport({ persona, url, brain: describeRun(common).replace(/^brain: /, ""), events, exit, flow: flowScore ?? undefined }),
-      );
-      writeFileSync(
-        `${sessionDir}/meta.json`,
-        JSON.stringify(
-          {
-            url,
-            personaId: pid,
-            brain: brain.name,
-            model: common.model ?? null,
-            effort: common.effort ?? null,
-            exit,
-            viewport: common.mobile ? "mobile" : "desktop",
-            flow: flowScore,
-            mailProbe,
-            // claude reports tokens/cost; opencode does not, so the eval also
-            // has steps + wall-clock as a model-agnostic efficiency proxy
-            usage: (brain as { usage?: unknown }).usage ?? null,
-            steps: events.length,
-            durationSeconds: journeySeconds(events),
-          },
-          null,
-          2,
-        ),
-      );
-      dirs.push(sessionDir);
-
-      if (exit.kind === "completed") goalPasses++;
-      printPerCallUsage((brain as { usage?: unknown }).usage);
-      printSessionSummary(exit, events, sessionDir, ++done, personaIds.length);
     } catch (e) {
-      // a setup failure (mailbox, browser launch) must not kill the other runs
-      console.error(`  ${tag ? `[${tag}] ` : ""}run failed before the session started: ${(e as Error).message.split("\n")[0]}`);
+      // a setup failure (mailbox, browser launch) must not kill the other runs,
+      // and it is our side — filed as could-not-run so CI can tell it apart
+      const detail = (e as Error).message.split("\n")[0];
+      console.error(`  ${tag ? `[${tag}] ` : ""}run failed before the session started: ${detail}`);
+      exit = { kind: "couldnotrun", detail: `Setup failed before the session started: ${detail}` };
     } finally {
-      // before close(), and in finally, so an error mid-session still yields a video
-      await driver.saveVideo(`${sessionDir}/video.webm`).catch(() => {});
+      // video first: the report's Evidence section names files that only
+      // exist once saveVideo() has run. Report + filmstrip are written here
+      // (not above) so mid-session errors still yield both.
+      const video = await driver.saveVideo(`${sessionDir}/video.webm`).catch(() => null);
+      if (exit) {
+        writeFileSync(
+          `${sessionDir}/meta.json`,
+          JSON.stringify(
+            {
+              url,
+              personaId: pid,
+              brain: brain.name,
+              version: VERSION,
+              model: common.model ?? null,
+              effort: common.effort ?? null,
+              exit,
+              viewport: common.mobile ? "mobile" : "desktop",
+              flow: flowScore,
+              ...(common.variant ? { variant: common.variant } : {}),
+              assertions: asserted ?? null,
+              mailProbe,
+              // claude reports tokens/cost; opencode does not, so the eval also
+              // has steps + wall-clock as a model-agnostic efficiency proxy
+              usage: (brain as { usage?: unknown }).usage ?? null,
+              steps: events.length,
+              durationSeconds: journeySeconds(events),
+            },
+            null,
+            2,
+          ),
+        );
+        dirs.push(sessionDir);
+        exits.push(exit.kind);
+        printPerCallUsage((brain as { usage?: unknown }).usage);
+        printSessionSummary(exit, events, sessionDir, ++done, personaIds.length);
+        if (events.length > 0) {
+          writeFileSync(`${sessionDir}/filmstrip.html`, generateFilmstrip({ persona, url, events }));
+        }
+        writeFileSync(
+          `${sessionDir}/report.md`,
+          generateReport({
+            persona,
+            url,
+            brain: describeRun(common).replace(/^brain: /, ""),
+            events,
+            exit,
+            flow: flowScore ?? undefined,
+            assertions: asserted,
+            media: {
+              filmstrip: events.length > 0 ? "filmstrip.html" : null,
+              videoMp4: video?.mp4 ? "video.mp4" : null,
+              videoWebm: video?.webm ? "video.webm" : null,
+            },
+          }),
+        );
+        if (video?.mp4) console.log(`  ${tag ? `[${tag}] ` : ""}▶ video.mp4 (plays everywhere)`);
+      }
       await driver.close();
       if (mail && box) {
         try {
@@ -961,11 +1062,13 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
     console.log(`  ⚠ ${blamedEmail.length} prospects gave up over email and nothing inbound arrived — wrote ${marker}; the report will carry the warning`);
   }
   if (common.goal) {
-    const pass = goalPasses === personaIds.length;
+    const code = goalExitCode(exits, personaIds.length);
+    const passes = exits.filter((k) => k === "completed").length;
+    const blocked = exits.filter((k) => k === "couldnotrun").length;
     console.log(
-      `\n  goal ${pass ? "PASS" : "FAIL"}: ${goalPasses}/${personaIds.length} session(s) completed "${common.goal}"`,
+      `\n  goal ${code === 0 ? "PASS" : code === 1 ? "FAIL" : "COULD NOT RUN"}: ${passes}/${personaIds.length} session(s) completed "${common.goal}"${blocked ? ` — ${blocked} could not run (our side, not the site's)` : ""}`,
     );
-    if (!pass) process.exitCode = 1;
+    if (code) process.exitCode = code;
   }
   return dirs;
 }
@@ -1015,6 +1118,7 @@ function printSessionSummary(
   }
   if (exit.kind === "completed") console.log(`  ${exit.summary}`);
   if (exit.kind === "guardrail") console.log(`  ${exit.detail}`);
+  if (exit.kind === "couldnotrun") console.log(`  ${exit.detail} (our side — says nothing about the site)`);
   console.log(`  Session: ${sessionDir}`);
   // running tally — with concurrent agents this is the one honest progress line
   console.log(progressBar(n, total, "agents finished"));
@@ -1035,6 +1139,44 @@ function resolveTargets(args: string[]): string[] {
     const latest = runDirs(site).at(-1);
     return latest ? findSessionDirs(latest) : findSessionDirs(`${RUNS_ROOT}/${site}`);
   });
+}
+
+/**
+ * --compare <site>: the newest run of every variant, side by side. Runs are
+ * folders, so two `--variant` invocations never share an aggregate — this is
+ * where they meet. Writes runs/<site>/COMPARE.md and prints it.
+ */
+function compare(site: string): void {
+  const newest = new Map<string, string>();
+  for (const run of runDirs(site)) {
+    const v = variantOf(run);
+    if (v) newest.set(v, run); // runDirs is oldest first, so the last wins
+  }
+  if (newest.size < 2) {
+    console.error(`\n  ${site} has ${newest.size} variant run(s); --compare needs two. Run \`leakdown <url> --variant a\` and \`--variant b\` first.\n`);
+    process.exit(1);
+  }
+  const dirs = [...newest.values()].flatMap((run) => findSessionDirs(run));
+  const sessions = loadSessions(dirs);
+  const body = renderVariants(sessions);
+  const md = [`# ${site} — variants compared`, "", `Newest run per variant: ${[...newest.entries()].map(([v, r]) => `\`${v}\` → ${dirLabel(r)}`).join("; ")}.`, "", ...body, watermark(site)].join("\n");
+  writeFileSync(`${RUNS_ROOT}/${site}/COMPARE.md`, md);
+  console.log("\n" + md.replace(/^## Variants compared.*$/m, "").trim() + `\n\n  Written: runs/${site}/COMPARE.md\n`);
+}
+
+/**
+ * runs/<site>/VERDICTS.md: one line per wall for the owner to mark `real:` or
+ * `false:`. Written once, never overwritten — the aggregate reads the ticks back.
+ */
+function writeVerdictsStub(site: string, aggregatePath: string): void {
+  const path = `${RUNS_ROOT}/${site}/VERDICTS.md`;
+  if (existsSync(path)) return;
+  const walls = [...readFileSync(aggregatePath, "utf8").matchAll(/^### \d+\. (.+)$/gm)].map((m) => m[1].replace(/`/g, ""));
+  if (!walls.length) return;
+  writeFileSync(
+    path,
+    `# ${site} — your verdicts\n\nChange each \`?:\` to \`real:\` (you checked, it is a real problem) or \`false:\` (not a problem). The next report counts them.\n\n${walls.map((w) => `?: ${w}`).join("\n")}\n`,
+  );
 }
 
 /** "2 of 26 completed their goal." from a run's AGGREGATE.md, or null. */
@@ -1110,10 +1252,10 @@ function fixesOnlyDirs(seatDir: string): string[] {
 function runSummary(run: string, dirs: string[]): string {
   const sessions = loadSessions(dirs);
   const site = basename(resolve(run, "../.."));
-  const rows = new Map<string, { n: number; completed: number; abandoned: number; guardrail: number; tokens: number; seconds: number }>();
+  const rows = new Map<string, { n: number; completed: number; abandoned: number; guardrail: number; couldnotrun: number; tokens: number; seconds: number }>();
   for (const s of sessions) {
     const key = `${seatOf(s.dir) ?? "wide"} | ${modelOf(s.dir) ?? s.meta.brain ?? "default"}`;
-    const r = rows.get(key) ?? { n: 0, completed: 0, abandoned: 0, guardrail: 0, tokens: 0, seconds: 0 };
+    const r = rows.get(key) ?? { n: 0, completed: 0, abandoned: 0, guardrail: 0, couldnotrun: 0, tokens: 0, seconds: 0 };
     r.n++;
     r[s.meta.exit.kind]++;
     // the zod meta drops unknown keys, so read usage and duration off the file itself
@@ -1127,9 +1269,9 @@ function runSummary(run: string, dirs: string[]): string {
   const L = [
     `# ${site} — run ${dirLabel(run).split("/").slice(1).join(" ")}`,
     "",
-    "| seat | model | sessions | completed | walked out | out of patience or harness | tokens | minutes |",
-    "|---|---|---|---|---|---|---|---|",
-    ...[...rows.entries()].sort().map(([k, r]) => `| ${k} | ${r.n} | ${r.completed} | ${r.abandoned} | ${r.guardrail} | ${r.tokens ? r.tokens.toLocaleString("en-US") : "—"} | ${Math.round(r.seconds / 60)} |`),
+    "| seat | model | sessions | completed | walked out | out of patience or harness | could not run | tokens | minutes |",
+    "|---|---|---|---|---|---|---|---|---|",
+    ...[...rows.entries()].sort().map(([k, r]) => `| ${k} | ${r.n} | ${r.completed} | ${r.abandoned} | ${r.guardrail} | ${r.couldnotrun} | ${r.tokens ? r.tokens.toLocaleString("en-US") : "—"} | ${Math.round(r.seconds / 60)} |`),
   ];
   if (verifiers.length) L.push("", `Verifier: ${[...new Set(verifiers.map((d) => basename(resolve(d, ".."))))].join(", ")} reviewed ${verifiers.length} session(s) → VERIFIED.md`);
   const files = ["AGGREGATE.md", "DETAIL.md", "VERIFIED.md", "REPORT.md"].filter((f) => existsSync(`${run}/${f}`));
@@ -1204,6 +1346,7 @@ async function report(dirs: string[] | undefined, force = false) {
 
     mkdirSync(run, { recursive: true });
     writeFileSync(`${run}/AGGREGATE.md`, generateAggregate(runDirsHere));
+    writeVerdictsStub(site, `${run}/AGGREGATE.md`);
     writeFileSync(`${run}/DETAIL.md`, generateDetail(runDirsHere));
     if (runDirOf(runDirsHere[0])) {
       bundleSeat(run, "verify", "VERIFIED.md", "verified: the sessions the filter chose, reviewed by the verifier seat");
@@ -1605,14 +1748,20 @@ async function smtpSend(to: string, mime: string): Promise<boolean> {
   if (!cfg) return false;
   const smtpHost = cfg.host.replace(/^imap\./, "smtp.");
   try {
-    await execa(
-      "curl",
-      ["-sS", "--ssl-reqd", `smtps://${smtpHost}:465`,
-       "--mail-from", cfg.user, "--mail-rcpt", to,
-       "--user", `${cfg.user}:${cfg.pass}`, "-T", "-"],
-      { input: mime, timeout: 60_000 },
-    );
-    return true;
+    // the password goes through a 0600 config file, never argv (visible to every process in `ps`)
+    const conf = `${tmpdir()}/leakdown-smtp-${process.pid}-${Date.now()}.conf`;
+    writeFileSync(conf, `user = "${cfg.user}:${cfg.pass.replace(/"/g, '\\"')}"\n`, { mode: 0o600 });
+    try {
+      await execa(
+        "curl",
+        ["-sS", "--ssl-reqd", "--config", conf, `smtps://${smtpHost}:465`,
+         "--mail-from", cfg.user, "--mail-rcpt", to, "-T", "-"],
+        { input: mime, timeout: 60_000 },
+      );
+      return true;
+    } finally {
+      rmSync(conf, { force: true });
+    }
   } catch {
     return false;
   }
@@ -2143,6 +2292,20 @@ const VALUE_FLAGS = new Set([
   "--count",
   "--goal",
   "--steps",
+  "--expect",
+  "--flow-file",
+  "--variant",
+  "--validate-flow",
+  "--order",
+  "--reject",
+]);
+
+/** Every flag the CLI understands. A typo used to be ignored and the run went ahead without it. */
+const KNOWN_FLAGS = new Set([
+  ...VALUE_FLAGS,
+  "--all", "--compare", "--doctor", "--fix", "--force", "--headless", "--help", "-h", "--history", "--ladder",
+  "--list-personas", "--mailtest", "--mobile", "--no-map", "--orders", "--parallel", "--pdf", "--plan",
+  "--replication", "--report", "--serial", "--version", "-v", "--yes", "-y", "--new",
 ]);
 
 /** Everything that is not a flag or a flag's value. */
@@ -2178,6 +2341,15 @@ async function main() {
     printUsage();
     process.exit(0);
   }
+  if (argv.includes("--version") || argv.includes("-v")) {
+    console.log(`leakdown ${VERSION}`);
+    process.exit(0);
+  }
+  const unknown = argv.filter((a) => /^--?[a-z]/i.test(a) && !KNOWN_FLAGS.has(a));
+  if (unknown.length) {
+    console.error(`Unknown flag${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}. See \`leakdown --help\`.`);
+    process.exit(1);
+  }
 
   // legacy subcommand form, kept so nothing anyone typed before breaks
   if (LEGACY.has(argv[0])) {
@@ -2201,6 +2373,13 @@ async function main() {
   }
   if (argv.includes("--mailtest")) return void (await mailtest());
   if (argv.includes("--list-personas")) return personasCommand([]);
+  if (argv.includes("--validate-flow")) {
+    const file = flagValue(argv, "--validate-flow");
+    const checks = file ? [validateFlow(file)] : validateFlowDir(FLOWS_DIR);
+    console.log("\n" + renderFlowChecks(checks));
+    if (checks.some((c) => !c.ok)) process.exit(1);
+    return;
+  }
   if (argv.includes("--new-persona")) {
     const name = flagValue(argv, "--new-persona");
     if (!name) {
@@ -2219,6 +2398,14 @@ async function main() {
       process.exit(1);
     }
     return void (await fix(dirs, common, force));
+  }
+  if (argv.includes("--compare")) {
+    const site = positionals[0];
+    if (!site) {
+      console.error("--compare needs a site: leakdown --compare <site> (after two runs with --variant)");
+      process.exit(1);
+    }
+    return void compare(siteSlug(site));
   }
   if (argv.includes("--report")) {
     return void (await report(positionals.length ? resolveTargets(positionals) : undefined, force));

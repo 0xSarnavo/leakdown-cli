@@ -28,6 +28,7 @@ Simulated prospects visit a target URL in a real browser (Playwright). At each s
 npm install
 npm run build
 npx playwright install chromium   # one time
+brew install ffmpeg               # one time — playable video.mp4 per session (else video.webm only)
 ```
 
 Requirements: Node 20+, and at least one AI CLI logged in via subscription (no API keys):
@@ -107,8 +108,8 @@ Point it at a site and five stages run in order:
 |---|---|---|
 | `site` | Scrapes the landing page: what it sells, to whom, its CTA, signup path, visible pricing, walls, what a first-timer trips on | `runs/<site>/SITE.md` |
 | `map` | Crawls two clicks from the landing page plus `sitemap.xml`, no brain: every internal page tagged by kind, and every booking or payment surface, on-site or off. The aggregate later lists pages no prospect found | `runs/<site>/MAP.md`, `map.json` |
-| `personas` | Builds a prospect set fitted to that product, spread across core / adjacent / edge | `runs/<site>/personas/` |
-| `visit` | One session per persona — one at a time by default (`--parallel` runs a multi-persona queue all at once; omit both flags and it asks) — live thought stream (lines prefixed by persona id), ending COMPLETED / ABANDONED / GUARDRAIL | `session.jsonl`, `report.md`, `video.webm` |
+| `personas` | Builds a prospect set fitted to that product (`--count`, default 10), spread across core / adjacent / edge; `--flow "<intent>"` drafts the checkpoints the set is shaped around | `runs/<site>/personas/`, `FLOW.md` |
+| `visit` | One session per persona — one at a time by default (`--serial`; `--parallel` runs a multi-persona queue all at once; omit both flags and it asks), desktop unless `--mobile` — live thought stream (lines prefixed by persona id), ending COMPLETED / ABANDONED / GUARDRAIL / COULD NOT RUN | `session.jsonl`, `report.md`, `video.mp4` (+ `video.webm`), `filmstrip.html` |
 | `report` | The short report an owner reads — one number, the walls with quotes and "check it yourself" steps, a developer section — plus every table behind it | `runs/<site>/AGGREGATE.md`, `DETAIL.md` |
 | `fix` | Expert panel over each session | `FIXES.md` per session |
 
@@ -152,10 +153,57 @@ leakdown <url> --goal "log in and get an API key" --steps 15 --yes --headless
 ```
 
 `--goal` swaps every queued persona's goal for the asserted one and turns the
-run into a pass/fail test: exit code 0 only when every session ends
-`completed` (verification included), 1 otherwise — so it slots into CI.
-`--steps` (1-50) caps each session's patience for the test. Everything else is
-unchanged: same personas, same reports, same artifacts.
+run into a pass/fail test. Exit codes: 0 when every session ends `completed`
+(verification included); 1 when any session walked out or hit a guardrail —
+the site failed somebody; 2 when nothing failed but a session *could not run*
+(unreachable URL, brain down, setup error) — our side, not the site's, so CI
+can tell the two apart. `--steps` (1-50) caps each session's patience for the
+test. Everything else is unchanged: same personas, same reports, same artifacts.
+
+`--expect "label=value"` (repeatable) adds value checks: a completion claim
+counts only when the page shows every expected value (dumb substring over the
+full snapshot, whitespace-insensitive). A failed check never spends a
+verification call; the session continues with a note, and `report.md` gets an
+Assertions section quoting expected vs. found ("expected total=$96.00, found
+'Total: $120.00'"). The expectations are appended to the persona's goal, so the
+persona and the verifier both read them.
+
+### Flows you write
+
+```bash
+leakdown --validate-flow flows/signup.yaml      # no browser; lists what is wrong, exits 1 on errors
+leakdown <url> --flow-file signup --yes         # runs against flows/signup.yaml (or runs/<site>/flows/)
+```
+
+A flow file is the journey you want checked, as ordered steps — a string, or
+`{name, expect}` where `expect` is page text that proves the step. Sessions are
+still personas deciding for themselves; the file scripts nothing. After each
+session `scoreFlow()` judges which steps were reached. A `stop_after` step
+(which must carry `expect`) ends the session COMPLETED the moment its text is on
+screen, before the next step is spent — the local "approved this far" boundary.
+That step is then marked reached mechanically, whatever the scorer says.
+Format and an example: `src/site/flow-load.ts` (top comment) and
+`flows/example-signup.yaml`. Site-local flows win an id collision with global
+ones, like personas.
+
+### A/B on one laptop
+
+```bash
+leakdown <url-a> --variant control --yes --headless
+leakdown <url-b> --variant new-pricing --yes --headless
+leakdown --compare <site>                        # runs/<site>/COMPARE.md
+```
+
+`--variant` labels every session (`meta.variant`) and the run folder
+(`<time>--<slug>`). Runs are folders, so two variant runs never share an
+aggregate; `--compare` takes the newest run of each variant under a site and
+renders `renderVariants()`: sessions, completed, leaked (walked out or out of
+patience), a Wilson interval per variant, where each lost people, and one
+verdict — which leaks more, or "no meaningful difference" when the intervals
+overlap, or "too few" under three sessions a side. Could-not-run sessions are
+excluded from every rate. Exactly two variants are compared; more are listed.
+The same section appears inside AGGREGATE.md when one aggregate happens to hold
+two variants.
 
 ### On its own
 
@@ -169,7 +217,7 @@ leakdown --mailtest             # mailbox lifecycle test
 leakdown <url> --persona marcus,marcus,marcus   # the same persona three times (test-retest); --random <n> draws random ones
 leakdown --history [site]       # one line per run: date, the one number, who sat in which seat
 leakdown --fix site-b.ai   # a site name means its newest run; site/date/time names one run
-leakdown --orders               # run requests left on the website
+leakdown --orders [--all]       # run requests left on the website (new ones, or every status)
 leakdown --order <id>           # run one here, email the PDF; --reject "why" declines it
 ```
 
@@ -348,9 +396,11 @@ page as "Continue".
 - **Payment.** Card-number fields (by label), anything passing a Luhn check, and
   commit controls: "Pay", "Pay now", "Buy it now", "Place your order",
   "Complete your order", "Confirm & pay", PayPal/Apple Pay/Google Pay, "Donate",
-  and a bare "Subscribe" (Stripe Checkout's literal commit button in
-  subscription mode). "Upgrade" and "See pricing" pass — they open a checkout
-  the persona should be able to reach and describe. Beyond English: es/pt/fr/de/
+  "Start (paid) subscription". A bare "Subscribe" is deliberately NOT blocked:
+  Stripe Checkout uses it as its commit button, but a newsletter "Subscribe" is
+  far commoner and a wanted action (`src/safety.ts:91`). "Upgrade" and "See
+  pricing" pass — they open a checkout the persona should be able to reach and
+  describe. Beyond English: es/pt/fr/de/
   it/nl commit phrasings ("Pagar", "Payer", "Kostenpflichtig bestellen",
   "Finalizar compra", "Valider la commande"), plus ru/ja/zh/ko ("Оплатить",
   "今すぐ購入", "立即购买", "결제하기"). Bare verbs count only as the WHOLE label,
@@ -393,7 +443,7 @@ A refusal does not end the session. The persona is told why, and either routes
 around it or walks out — which is the behaviour you want recorded.
 
 Enforced via persona prompt only (strict, but not mechanical):
-- Never deletes data or invites teammates
+- Never deletes data, invites teammates, publishes anything, opens support chat, or contacts third parties
 
 ### Why this replaced the URL blocklist
 
@@ -412,8 +462,10 @@ runs/
     MAP.md, map.json             # crawler's view: pages by kind, booking/payment surfaces
     personas/                    # the prospects generated for this product
     FLOW.md, analytics.json      # the flow under test; the owner's real-visitor numbers (optional)
+    flows/                       # this site's hand-written flows (--flow-file); global ones live in ./flows/
+    COMPARE.md                   # --compare: the newest run of each --variant, side by side
     RUN.md, AGGREGATE.md, DETAIL.md, VERIFIED.md, REPORT.md   # copies of the newest run's files
-    <YYYY-MM-DD>/<HH-MM-SS>/     # one run = one CLI invocation
+    <YYYY-MM-DD>/<HH-MM-SS>/     # one run = one CLI invocation (<HH-MM-SS>--<variant> for an A/B run)
       RUN.md                     # which model sat in which seat, how sessions ended, tokens, minutes
       AGGREGATE.md               # the short report over the run: one number, the walls, developer refs
       DETAIL.md                  # every session, every table, every quote — the appendix
@@ -425,7 +477,8 @@ runs/
         <HH-MM-SS>-<persona>/
           session.jsonl          # one event per step: url, thought, emotion, confusion, action
           shots/                 # step screenshots
-          video.webm             # full browser recording (VP8 WebM)
+          video.mp4              # playable recording (H.264, needs ffmpeg) + video.webm fallback
+          filmstrip.html           # every step's screenshot with its thought, no video needed
           report.md              # verdict + drop-off analysis + timeline + confusion curve
           meta.json              # metadata for stages 2-3, incl. brain/model/effort
           FIXES.md               # expert panel findings (after stage 3)
@@ -452,7 +505,10 @@ Session directories are found by walking `runs/` for any folder containing a
 in any layout, and `--report` groups them by run folder (or by site when there is
 none).
 
-`video.webm` is VP8. QuickTime cannot play it; use a browser or VLC.
+`video.mp4` is H.264 with faststart: plays in QuickTime, Safari, browsers, VLC. It is
+transcoded after each session when `ffmpeg` is installed (`brew install ffmpeg`) and the
+`video.webm` is then deleted (the mp4 is 60% of its size); without ffmpeg, or when the
+transcode fails, `video.webm` (VP8) is kept. Failures never fail the run.
 
 ## Useful commands
 
@@ -490,7 +546,7 @@ dependencies (`playwright`, `execa`, `imapflow`, `yaml`, `zod`). The bin is
 cli.ts  ──►  BrowserDriver + Brain + optional MailProvider
                     │
                     ▼
-              runSession()  ──►  session.jsonl  +  shots/  +  video.webm
+              runSession()  ──►  session.jsonl  +  shots/  +  video.mp4
                     │
                     ▼
             generateReport()  ──►  report.md  +  meta.json
@@ -534,10 +590,10 @@ loop `continue`s with a note, because personas are wrong about being done.
 | Path | Owns | Touch it when |
 |---|---|---|
 | `src/cli.ts` | Flag parsing, the wizard, `prepareSite`/`prepareSitePersonas`, and every stage wired end to end. The only file that knows about every other. | Adding a flag or changing the run order |
-| `src/session.ts` | The step loop, exit conditions, `stuckPattern()`, inbox merging | Changing how a journey runs or ends |
+| `src/session.ts` | The step loop, exit conditions (`completed`, `abandoned`, `guardrail`, `couldnotrun`), `checkAssertions()`, the flow stop point, `goalExitCode()`, `stuckPattern()`, inbox merging | Changing how a journey runs or ends |
 | `src/types.ts` | `Persona`; the `Decision` / `StepEvent` / `Verdict` zod schemas; the `Brain` and `BrainContext` interfaces; `SAFETY_RULES` prompt text | Changing the decision contract |
 | `src/safety.ts` | `blockedAction()` — label extraction, Luhn, payment and SSO matching | Adding or relaxing a guard |
-| `src/runs.ts` | The `runs/` layout: `siteSlug()`, `sessionPath()`, `findSessionDirs()` | Changing where sessions land |
+| `src/runs.ts` | The `runs/` layout: `siteSlug()`, `sessionPath()`, `findSessionDirs()`, the `--variant` run-folder suffix | Changing where sessions land |
 | `src/doctor.ts` | Environment verification and its 7-day state cache; the daily mail-probe record | Adding a preflight check |
 | `src/orders.ts` | Website orders: list, fetch, set status; `mimeWithAttachment()` for the emailed PDF | Changing how an order is fulfilled |
 | `src/browser/driver.ts` | Playwright wrapper: `snapshot()` and its per-ref visibility measurement, actions, screenshots, video, popup following, `needsKeystrokes()`, `chooseRecording()` | Anything the browser does |
@@ -561,8 +617,10 @@ loop `continue`s with a note, because personas are wrong about being done.
 | `src/site/map.ts` | `runs/<site>/map.json`: the crawl, `classify()`, and `unreached()` / `guardedSurfaces()` the aggregate reads | Changing what counts as a page, or a booking/payment surface |
 | `src/site/analytics.ts` | `runs/<site>/analytics.json`: the owner's real-visitor numbers, validated and rendered for persona generation | Changing what calibration reads |
 | `src/site/flow.ts` | `runs/<site>/FLOW.md`: drafting checkpoints from an intent, and `scoreFlow()` judging a finished session against them | Changing what a flow is or how sessions are scored |
+| `src/site/flow-load.ts` | Hand-written flows: `flows/*.yaml` discovery and validation (`--validate-flow`), `toFlow()` into the scorer's shape, the `stop_after` stop point the session loop honours | Changing the flow file format |
+| `src/log/stats.ts` | Pure counts math: Wilson `confidenceInterval()`, `lift()`, `strength()`, `overlap()`; under 3 sessions nothing is quantified | Changing how sure a report claims to be |
 | `src/log/report.ts` | Per-session `report.md` and its timing | Changing a session report |
-| `src/log/aggregate.ts` | `loadSessions()` (zod-validated), `generateAggregate()` (the short report) and `generateDetail()` (the appendix) | Changing what an owner or a developer reads |
+| `src/log/aggregate.ts` | `loadSessions()` (zod-validated), `generateAggregate()` (the short report), `generateDetail()` (the appendix), `renderVariants()` (the A/B section, also behind `--compare`) | Changing what an owner or a developer reads |
 | `src/log/replication.ts` | Element refs cited across sessions: `collectSightings()`, `replicationTable()`; `--replication` | Changing what counts as replicated |
 | `src/log/pdf.ts` | `--pdf`: one send-ready PDF per site from AGGREGATE.md + one model's FIXES.md | Changing the packet |
 | `src/experts/index.ts` | The `EXPERTS` registry | Registering an expert |
@@ -717,6 +775,8 @@ gh release create v<version> --title "<version>" --notes-file <(awk '/^## <versi
 
 The GitHub Release carries the same text as the file; nothing is written twice
 by hand. Layout changes under `runs/` and renamed flags are always a minor bump.
+Standing rule: every push that changes behavior ships a version bump (minor for
+features, flag renames, layout changes) with its CHANGELOG entry — no exceptions.
 
 ## The decisions log
 

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
-import { dirLabel, findSessionDirs, modelSlug, newRunDir, runDirOf, runDirs, seatOf, sessionPath, siteSlug } from "./runs.js";
+import { VARIANT_PATTERN, dirLabel, findSessionDirs, modelSlug, newRunDir, runDirOf, runDirs, seatOf, sessionPath, siteSlug, variantOf } from "./runs.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "leakdown-runs-"));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -136,5 +136,36 @@ describe("dirLabel", () => {
 
   it("falls back to the leaf when there is no runs/ segment", () => {
     assert.equal(dirLabel("/tmp/somewhere/else"), "else");
+  });
+});
+
+describe("variants", () => {
+  const when = new Date("2026-09-17T10:00:00.000Z");
+
+  it("a plain run's folder is byte-identical to before — no variant, no suffix", () => {
+    assert.equal(newRunDir("https://example.com", when, `${scratch}/v`), resolve(`${scratch}/v/example.com/2026-09-17/10-00-00`));
+    assert.equal(variantOf(newRunDir("https://example.com", when, `${scratch}/v`)), null);
+  });
+
+  it("suffixes the run folder with the variant and reads it back", () => {
+    const run = newRunDir("https://example.com", when, `${scratch}/v`, "new-pricing");
+    assert.ok(run.endsWith("/2026-09-17/10-00-00--new-pricing"), run);
+    assert.equal(variantOf(run), "new-pricing");
+    const session = sessionPath(run, "wide", "haiku", "cold", when);
+    assert.equal(runDirOf(session), run, "a variant run is still a run: seat/model/session below it");
+  });
+
+  it("runDirs lists plain and variant runs together, oldest first", () => {
+    const root = `${scratch}/v2`;
+    for (const [t, v] of [["2026-09-17T10:00:00Z", undefined], ["2026-09-17T10:05:00Z", "a"], ["2026-09-17T10:10:00Z", "b"]] as const) {
+      mkdirSync(newRunDir("https://example.com", new Date(t), root, v), { recursive: true });
+    }
+    const runs = runDirs("example.com", root).map((r) => r.split("/").at(-1));
+    assert.deepEqual(runs, ["10-00-00", "10-05-00--a", "10-10-00--b"]);
+  });
+
+  it("accepts slugs and rejects anything that would not survive as a folder suffix", () => {
+    for (const ok of ["a", "control", "new-pricing", "v2", "x".repeat(40)]) assert.ok(VARIANT_PATTERN.test(ok), ok);
+    for (const bad of ["", "New", "has space", "-lead", "a/b", "x".repeat(41), "ünï"]) assert.ok(!VARIANT_PATTERN.test(bad), bad);
   });
 });

@@ -26,6 +26,8 @@ const FlowSchema = z.object({
 export interface Flow {
   intent: string;
   checkpoints: string[];
+  /** From a flow file's `stop_after`: the session ends COMPLETED once `text` is on screen */
+  stop?: { index: number; label: string; text: string };
 }
 
 /** One checkpoint's verdict for one session, stored in meta.json. */

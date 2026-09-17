@@ -20,7 +20,7 @@ export interface Persona {
 export const SAFETY_RULES = `- You may LOOK at pricing, billing and checkout pages — seeing them is useful. But you NEVER actually pay: no card details, and never the final "Pay"/"Place order" button. The system blocks it anyway.
 - You NEVER sign in with Google/GitHub/Apple/SSO. Use email signup, or walk away. The system blocks it anyway.
 - You may open a demo/meeting scheduler and look at slots, but you NEVER finish booking — never the final "Confirm"/"Schedule event" button. A real person would have to attend that meeting. Seeing that signup is demo-gated IS your finding. The system blocks it anyway.
-- You NEVER delete data or send invites to teammates.`;
+- You NEVER delete data, invite teammates, publish or post anything public, open a support chat, or send anything to a third party. You are a visitor looking, not a customer acting on their behalf.`;
 
 export const DecisionSchema = z.object({
   thought: z.string().describe("First-person inner monologue about what you see"),
@@ -80,7 +80,14 @@ export const ExitReasonSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("completed"), summary: z.string() }),
   z.object({ kind: z.literal("abandoned"), reason: z.string(), question: z.string() }),
   z.object({ kind: z.literal("guardrail"), detail: z.string() }),
+  // our side failed (unreachable URL, brain down, setup error) — says nothing about the site
+  z.object({ kind: z.literal("couldnotrun"), detail: z.string() }),
 ]);
+
+/** `--expect label=value`: the page must show `expected` before a completion counts. */
+export const AssertionSchema = z.object({ label: z.string().min(1), expected: z.string().min(1) });
+export type Assertion = z.infer<typeof AssertionSchema>;
+export type AssertionResult = Assertion & { ok: boolean; found: string };
 
 export const VerdictSchema = z.object({
   achieved: z.boolean(),
@@ -108,7 +115,8 @@ export type StepEvent = {
 export type ExitReason =
   | { kind: "completed"; summary: string }
   | { kind: "abandoned"; reason: string; question: string }
-  | { kind: "guardrail"; detail: string };
+  | { kind: "guardrail"; detail: string }
+  | { kind: "couldnotrun"; detail: string };
 
 export interface BrainContext {
   persona: Persona;

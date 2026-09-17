@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { generateAggregate, generateDetail, loadSessions } from "./aggregate.js";
+import { generateAggregate, generateDetail, loadSessions, renderVariants } from "./aggregate.js";
 
 const scratch = mkdtempSync(join(tmpdir(), "leakdown-agg-"));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -16,12 +16,13 @@ function session(opts: {
   steps?: { url: string; confusion: number; thought: string }[];
   url?: string;
   flow?: unknown;
+  variant?: string;
 }): string {
   const dir = join(scratch, `s${n++}-${opts.personaId}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
     join(dir, "meta.json"),
-    JSON.stringify({ url: opts.url ?? "https://site.com", personaId: opts.personaId, brain: "claude", exit: opts.exit, flow: opts.flow }),
+    JSON.stringify({ url: opts.url ?? "https://site.com", personaId: opts.personaId, brain: "claude", exit: opts.exit, flow: opts.flow, variant: opts.variant }),
   );
   const steps = opts.steps ?? [{ url: "https://site.com/", confusion: 3, thought: "ok" }];
   writeFileSync(
@@ -112,6 +113,76 @@ describe("generateAggregate (the short report)", () => {
   });
 });
 
+describe("generateAggregate could-not-run", () => {
+  it("counts could-not-run apart from walked out and harness stops, and blames our side", () => {
+    const out = generateAggregate([
+      session({ personaId: "hot", exit: { kind: "completed", summary: "done" } }),
+      session({ personaId: "cold", exit: { kind: "abandoned", reason: "r", question: "q" } }),
+      session({ personaId: "warm", exit: { kind: "guardrail", detail: "stuck loop" } }),
+      session({ personaId: "edge", exit: { kind: "couldnotrun", detail: "Brain failed at step 1" } }),
+    ]);
+    assert.match(out, /\*\*1 of 4 completed their goal\.\*\* 1 walked out with a reason\. 1 were stopped by the harness/);
+    assert.match(out, /1 could not run at all .* our side, not evidence about the site/);
+  });
+});
+
+describe("renderVariants (A/B)", () => {
+  const done = { kind: "completed", summary: "d" };
+  const left = { kind: "abandoned", reason: "no price", question: "cost?" };
+  const at = (variant: string, exit: Record<string, unknown>, url = "https://site.com/pricing") =>
+    session({ personaId: "cold", exit, variant, steps: [{ url, confusion: 5, thought: "t" }] });
+
+  it("renders nothing for a plain run or a single variant", () => {
+    assert.deepEqual(renderVariants(loadSessions([session({ personaId: "cold", exit: done })])), []);
+    assert.deepEqual(renderVariants(loadSessions([at("a", done), at("a", left)])), []);
+    assert.ok(!generateAggregate([at("a", done)]).includes("Variants compared"));
+  });
+
+  it("ranks the leakier variant first, with intervals, and says which pages differ", () => {
+    const dirs = [
+      at("control", done), at("control", done), at("control", left),
+      at("new-pricing", left), at("new-pricing", left), at("new-pricing", left, "https://site.com/signup"),
+    ];
+    const out = renderVariants(loadSessions(dirs)).join("\n");
+    assert.match(out, /## Variants compared \(2\)/);
+    assert.match(out, /\| `new-pricing` \| 3 \| 0 \| 3 \| 3\/3 sessions · 100% \[44–100%\] \|/);
+    assert.match(out, /\| `control` \| 3 \| 2 \| 1 \| 1\/3 sessions · 33% \[6–79%\] \|/);
+    assert.ok(out.indexOf("`new-pricing` |") < out.indexOf("`control` |"), "leakiest variant is not first");
+    assert.match(out, /site\.com\/pricing` — new-pricing 2\/3, control 1\/3/);
+    assert.match(out, /site\.com\/signup` — new-pricing 1\/3, control 0\/3/);
+    assert.match(generateAggregate(dirs), /## Variants compared/);
+    assert.match(generateDetail(dirs), /## Variants compared/);
+  });
+
+  it("says no meaningful difference when the intervals overlap, and too few when under three each", () => {
+    const small = renderVariants(loadSessions([at("a", done), at("a", left), at("b", left), at("b", left)])).join("\n");
+    assert.match(small, /too few sessions to call/);
+    const close = renderVariants(loadSessions([
+      at("a", done), at("a", done), at("a", left),
+      at("b", done), at("b", left), at("b", left),
+    ])).join("\n");
+    assert.match(close, /no meaningful difference between `b` and `a`/);
+  });
+
+  it("calls a clear winner when the intervals separate", () => {
+    const dirs = [
+      ...Array.from({ length: 12 }, () => at("a", done)),
+      ...Array.from({ length: 12 }, () => at("b", left)),
+    ];
+    const out = renderVariants(loadSessions(dirs)).join("\n");
+    assert.match(out, /\*\*Verdict:\*\* `b` leaks more — 100 points more/);
+  });
+
+  it("leaves could-not-run sessions out of every rate", () => {
+    const dirs = [
+      at("a", done), at("a", done), at("a", left), at("a", { kind: "couldnotrun", detail: "dns" }),
+      at("b", left), at("b", left), at("b", left),
+    ];
+    const out = renderVariants(loadSessions(dirs)).join("\n");
+    assert.match(out, /\| `a` \| 3 \(\+1 could not run\) \| 2 \| 1 \|/);
+  });
+});
+
 describe("generateDetail", () => {
   it("says so plainly when there is nothing to report", () => {
     assert.match(generateDetail([]), /No valid sessions/);
@@ -128,7 +199,11 @@ describe("generateDetail", () => {
     assert.match(out, /Completed \| 1/);
     assert.match(out, /Abandoned \| 2/);
     assert.match(out, /Guardrail \| 1/);
+    assert.ok(!out.includes("Could not run"), "row hidden when nobody was blocked");
     assert.match(out, /\*\*Sessions:\*\* 4/);
+    const blocked = generateDetail([...dirs, session({ personaId: "edge", exit: { kind: "couldnotrun", detail: "dns" } })]);
+    assert.match(blocked, /Could not run \(our side, not the site\) \| 1/);
+    assert.match(blocked, /⏸ could not run/);
     assert.match(out, /^# Session detail — /m);
   });
 

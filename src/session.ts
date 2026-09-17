@@ -1,4 +1,6 @@
 import type {
+  Assertion,
+  AssertionResult,
   BrainContext,
   Decision,
   ExitReason,
@@ -31,11 +33,17 @@ export interface SessionOptions {
    * clearLine races between concurrent sessions and shreds the output.
    */
   tag?: string;
+  /** `--expect` checks: a completion claim only counts when every one is on the page */
+  assertions?: Assertion[];
+  /** A flow file's stop point: end COMPLETED as soon as this text is on screen, before spending a step */
+  stopWhen?: { label: string; text: string };
 }
 
 export interface SessionResult {
   events: StepEvent[];
   exit: ExitReason;
+  /** The last assertion check — on the completion claim, or the final page seen */
+  assertions?: AssertionResult[];
 }
 
 const MAX_CONSECUTIVE_FAILURES = 4;
@@ -104,6 +112,8 @@ export async function runSession(opts: SessionOptions): Promise<SessionResult> {
   const budgetMs = (opts.timeBudgetMinutes ?? 20) * 60_000;
   const startedAt = Date.now();
   let waivedMs = 0;
+  let lastSnapshot = "";
+  let asserted: AssertionResult[] | undefined;
 
   for (let step = 1; spent < persona.patience_steps && step <= maxSteps; step++) {
     const elapsedMs = Date.now() - startedAt - waivedMs;
@@ -115,8 +125,10 @@ export async function runSession(opts: SessionOptions): Promise<SessionResult> {
       break;
     }
     let snap;
+    let screenshotPath: string;
     try {
-      snap = await driver.snapshot();
+      // both only read the page; the screenshot no longer waits for the measurement
+      [snap, screenshotPath] = await Promise.all([driver.snapshot(), driver.screenshotPath(step)]);
     } catch (e) {
       exit = {
         kind: "guardrail",
@@ -124,8 +136,14 @@ export async function runSession(opts: SessionOptions): Promise<SessionResult> {
       };
       break;
     }
+    lastSnapshot = snap.ariaYaml;
 
-    const screenshotPath = await driver.screenshotPath(step);
+    // the approved flow's boundary — checked before thinking, so it costs no call
+    if (opts.stopWhen && checkAssertions([{ label: opts.stopWhen.label, expected: opts.stopWhen.text }], snap.ariaYaml)[0].ok) {
+      console.log(`  ${tag}■ stop point reached: "${opts.stopWhen.label}"`);
+      exit = { kind: "completed", summary: `Reached the flow's stop point: ${opts.stopWhen.label} (page shows "${opts.stopWhen.text}")` };
+      break;
+    }
 
     const ctx: BrainContext = {
       persona,
@@ -156,8 +174,9 @@ export async function runSession(opts: SessionOptions): Promise<SessionResult> {
       waivedMs += Date.now() - thinkStart;
     } catch (e) {
       console.log(`${tag ? `  ${tag}brain` : ""} failed`);
+      // the model, not the site: a usage limit or outage is not evidence about the page
       exit = {
-        kind: "guardrail",
+        kind: "couldnotrun",
         detail: `Brain "${brain.name}" failed at step ${step}: ${(e as Error).message}`,
       };
       break;
@@ -190,6 +209,19 @@ export async function runSession(opts: SessionOptions): Promise<SessionResult> {
 
     // EXIT DECISIONS — complete requires verification first
     if (decision.action.type === "complete") {
+      // free check first, so a wrong claim never spends a verification call
+      if (opts.assertions?.length) {
+        asserted = checkAssertions(opts.assertions, snap.ariaYaml);
+        const failed = asserted.filter((a) => !a.ok);
+        if (failed.length) {
+          const note = failed.map((a) => `expected ${a.label}=${a.expected}, found ${a.found}`).join("; ");
+          console.log(`  ${tag}✗ assertion failed: ${trim(note, 120)}`);
+          event.note = `claimed complete but ${note}`;
+          events.push(event);
+          appendFileSync(jsonlPath, JSON.stringify(event) + "\n");
+          continue;
+        }
+      }
       if (verificationsUsed < MAX_VERIFICATIONS && brain.ask) {
         verificationsUsed++;
         const verdict = await verifyGoal(brain, persona.goal, snap.ariaYaml);
@@ -325,7 +357,38 @@ export async function runSession(opts: SessionOptions): Promise<SessionResult> {
     };
   }
 
-  return { events, exit };
+  // never claimed complete: still say what the last page showed
+  if (opts.assertions?.length && !asserted && lastSnapshot) asserted = checkAssertions(opts.assertions, lastSnapshot);
+  return { events, exit, assertions: asserted };
+}
+
+/**
+ * `--goal` exit code: 0 every session completed, 1 the site failed somebody
+ * (walked out, stuck, out of patience), 2 nothing failed but not everyone ran
+ * (unreachable URL, brain down, setup error) — so CI can tell app from infra.
+ */
+export function goalExitCode(exits: ExitReason["kind"][], expected: number): 0 | 1 | 2 {
+  if (exits.some((k) => k === "abandoned" || k === "guardrail")) return 1;
+  if (exits.length < expected || exits.some((k) => k === "couldnotrun")) return 2;
+  return 0;
+}
+
+/**
+ * Dumb substring match against the full snapshot (invariant 3: a value scrolled
+ * out of view still counts). `found` quotes the snapshot line that mentions the
+ * label, so a mismatch reads "expected total=$96.00, found 'Total: $120.00'".
+ */
+export function checkAssertions(assertions: Assertion[], ariaYaml: string): AssertionResult[] {
+  const flat = ariaYaml.replace(/\s+/g, " ");
+  return assertions.map((a) => {
+    const ok = flat.includes(a.expected.replace(/\s+/g, " ").trim());
+    if (ok) return { ...a, ok, found: a.expected };
+    // whole word first ("Total" before "Subtotal"), then any mention
+    const lines = ariaYaml.split("\n");
+    const word = new RegExp(`\\b${a.label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    const line = lines.find((l) => word.test(l)) ?? lines.find((l) => l.toLowerCase().includes(a.label.toLowerCase()));
+    return { ...a, ok, found: line ? `"${trim(line.replace(/^[\s-]+/, ""), 160)}"` : `nothing mentioning "${a.label}" on the page` };
+  });
 }
 
 async function verifyGoal(
