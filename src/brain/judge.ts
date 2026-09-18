@@ -41,6 +41,13 @@ export interface Judge {
 export async function loadJudge(): Promise<Judge | null> {
   const path = process.env.LEAKDOWN_JUDGE;
   if (!path) return null;
+  /* This imports and runs whatever it names, so it is worth being loud about
+     what it is: an absolute path you chose, not something resolved out of the
+     current directory, where a repo you are testing could have put a file. */
+  if (!path.startsWith("/") && !path.startsWith("file://")) {
+    console.warn(`  ⚠ LEAKDOWN_JUDGE should be an absolute path; got "${path.slice(0, 60)}" — running without a judge`);
+    return null;
+  }
   try {
     const mod = (await import(path)) as { createJudge?: () => Judge };
     if (typeof mod.createJudge !== "function") {
