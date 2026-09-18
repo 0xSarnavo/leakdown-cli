@@ -6,6 +6,23 @@ tags `v<version>`, and publishes the same text as a GitHub Release.
 
 ## Unreleased
 
+## 0.8.0 — 2026-09-18
+
+**The yes/no rulings can come from somewhere else.** Three of this tool's
+questions have a yes or no answer rather than prose: was the goal reached, which
+flow checkpoints were reached, and does the page show an expected value in other
+words. Point `LEAKDOWN_JUDGE` at a module that exports `createJudge()` and it
+answers those instead of the AI CLI; its tokens are recorded apart from the
+brain's, as `usageJudge` in `meta.json`. Unset, which is the default, nothing
+changes. A judge that is missing, broken or slow never ends a session — the
+ruling falls back to the same "inconclusive" path a failed model call takes.
+
+**Every completion claim now leaves its page behind.** A session that claims it
+is done writes `verifications.jsonl` — the page the judge read, the verdict it
+gave, and any `--expect` results. A rejected completion used to say only that it
+was rejected; now you can read the page and see whether the judge was right, and
+past runs can be replayed against a new judge without re-visiting the site.
+
 ## 0.7.0 — 2026-09-17
 
 **Goal tests can assert values.** `--expect "total=$96.00"` (repeatable, with

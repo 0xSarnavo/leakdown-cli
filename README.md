@@ -1,3 +1,18 @@
+```
+          @
+        O @ .
+      O @ O o .
+      @ @ @ O O
+    @ @ @ @ O O o
+  @ @ @ @ @ O o : .
+  O @ @ O O O o : .
+  O O O O o o : . .
+  : o o o o : . . .
+    : : : : . . .
+      . . . . .
+          .
+```
+
 # Leakdown
 
 Simulated prospects walk through your website's signup in a real browser, think out loud, and quit the way people do. You get one page: where they stalled, in their words, with the element and a "check it yourself" line — and an expert layer that proposes the fix.
@@ -30,7 +45,7 @@ Then read `runs/your-site.com/AGGREGATE.md`.
 | report | the one-page report, plus every table behind it | `AGGREGATE.md`, `DETAIL.md` |
 | fix | expert panel per session | `FIXES.md` |
 
-`--ladder` runs the full run: half the personas on haiku, half on a free opencode model, a mechanical filter keeps only what more than one session cites, sonnet verifies those three sessions, opus re-walks the hardest persona and writes its report. Cheap models vote; only opus writes what you read.
+`--ladder` runs the full run: half the personas on haiku, half on a free opencode model, a mechanical filter keeps only what more than one session cites, sonnet verifies up to three of those sessions, opus re-walks the hardest persona and writes its report. Cheap models vote; only opus writes what you read.
 
 ## What the report says
 
@@ -59,6 +74,8 @@ LEAKDOWN_IMAP_HOST="imap.gmail.com"
 LEAKDOWN_IMAP_USER="you@gmail.com"
 LEAKDOWN_IMAP_PASS="xxxx xxxx xxxx xxxx"   # app password
 LEAKDOWN_MAIL_DOMAIN="yourdomain.com"      # catch-all → that inbox
+LEAKDOWN_IMAP_PORT="993"                   # optional, for a non-Gmail host
+LEAKDOWN_IMAP_TLS="false"                  # optional, and only this exact word turns TLS off
 ```
 
 > The old `CLIENTSIM_*` names still work but are deprecated — use `LEAKDOWN_*`.
@@ -85,7 +102,7 @@ Drop `runs/<site>/analytics.json` (top exit pages, device mix, entry sources) an
 
 ## What it stores, and how to delete it
 
-Everything lands under `runs/<site>/` on the machine that ran it — nothing is uploaded. Per session: `session.jsonl` (every thought and every string the persona typed, including the names and passwords it invents), `shots/` (a screenshot per step, plus a render of every email received), `video.mp4`, `filmstrip.html`, `report.md`, `meta.json`. Screenshots and video show whatever the page showed — sign in past a signup and your own dashboard is on film. Delete a site with `rm -rf runs/<site>`.
+Everything lands under `runs/<site>/` on the machine that ran it — nothing is uploaded. Per session: `session.jsonl` (every thought and every string the persona typed, including the names and passwords it invents), `verifications.jsonl` (the page text behind every completion claim, so a verdict can be checked afterwards), `shots/` (a screenshot per step, plus a render of every email received), `video.mp4`, `filmstrip.html`, `report.md`, `meta.json`. Screenshots and video show whatever the page showed — sign in past a signup and your own dashboard is on film. Delete a site with `rm -rf runs/<site>`.
 
 After a run, `runs/<site>/VERDICTS.md` lists each wall with a `?:`; change it to `real:` or `false:` and the next report counts your verdicts.
 

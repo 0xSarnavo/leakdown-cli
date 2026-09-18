@@ -10,9 +10,10 @@ import type {
 import type { BrowserDriver } from "./browser/driver.js";
 import type { Brain } from "./types.js";
 import { appendFileSync } from "node:fs";
-import { buildVerificationPrompt } from "./brain/prompt.js";
+import { buildVerificationPrompt, fenceSafe } from "./brain/prompt.js";
 import { blockedAction } from "./safety.js";
 import { parseVerdict } from "./brain/adapters/cli-brain.js";
+import type { Judge } from "./brain/judge.js";
 import type { MailProvider, Mailbox, MailMessage } from "./mail/types.js";
 import { extractCodes, stripInvisible } from "./mail/types.js";
 
@@ -37,6 +38,8 @@ export interface SessionOptions {
   assertions?: Assertion[];
   /** A flow file's stop point: end COMPLETED as soon as this text is on screen, before spending a step */
   stopWhen?: { label: string; text: string };
+  /** An external judge (LEAKDOWN_JUDGE), when one is configured: it rules instead of `brain.ask` */
+  judge?: Judge;
 }
 
 export interface SessionResult {
@@ -209,22 +212,56 @@ export async function runSession(opts: SessionOptions): Promise<SessionResult> {
 
     // EXIT DECISIONS — complete requires verification first
     if (decision.action.type === "complete") {
+      /**
+       * What the judge was looking at, kept beside the session.
+       *
+       * The snapshot is a prompt-time artifact: it was never written down, so a
+       * rejected completion could be read ("verification said X") but not
+       * checked, and calibrating a judge against past runs was impossible — the
+       * one input it rules on was the one thing not on disk. One line per
+       * claim, so a past run can be replayed against another judge later.
+       */
+      const recordClaim = (verdict: { achieved: boolean; note: string } | null, note?: string) =>
+        appendFileSync(
+          `${opts.sessionDir}/verifications.jsonl`,
+          JSON.stringify({
+            n: step,
+            at: new Date().toISOString(),
+            url: snap.url,
+            goal: persona.goal,
+            judge: opts.judge ? "judge" : brain.name,
+            verdict,
+            note,
+            assertions: asserted,
+            ariaYaml: snap.ariaYaml,
+          }) + "\n",
+        );
       // free check first, so a wrong claim never spends a verification call
       if (opts.assertions?.length) {
         asserted = checkAssertions(opts.assertions, snap.ariaYaml);
+        // the page may say it in other words ("Total: $96" for "$96.00") — only
+        // the misses are worth a call, and only when the judge is on
+        if (opts.judge && asserted.some((a) => !a.ok)) {
+          const missed = asserted;
+          asserted = await opts.judge.judgeAssertions(missed, snap.ariaYaml).catch(() => missed);
+        }
         const failed = asserted.filter((a) => !a.ok);
         if (failed.length) {
           const note = failed.map((a) => `expected ${a.label}=${a.expected}, found ${a.found}`).join("; ");
           console.log(`  ${tag}✗ assertion failed: ${trim(note, 120)}`);
+          recordClaim(null, `assertion failed: ${note}`); // no verification call was spent
           event.note = `claimed complete but ${note}`;
           events.push(event);
           appendFileSync(jsonlPath, JSON.stringify(event) + "\n");
           continue;
         }
       }
-      if (verificationsUsed < MAX_VERIFICATIONS && brain.ask) {
+      if (verificationsUsed < MAX_VERIFICATIONS && (opts.judge || brain.ask)) {
         verificationsUsed++;
-        const verdict = await verifyGoal(brain, persona.goal, snap.ariaYaml);
+        const verdict = opts.judge
+          ? await opts.judge.verifyGoal(persona.goal, snap.ariaYaml).catch(() => null)
+          : await verifyGoal(brain, persona.goal, snap.ariaYaml);
+        recordClaim(verdict);
         if (!verdict || !verdict.achieved) {
           const note =
             verdict?.note ??
@@ -236,6 +273,9 @@ export async function runSession(opts: SessionOptions): Promise<SessionResult> {
           continue; // keep going — the persona was wrong about being done
         }
         console.log(`  ${tag}✓ goal verified complete`);
+      } else {
+        // the claim that ends the session unchecked: worth a line most of all
+        recordClaim(null, `accepted unverified (${verificationsUsed} of ${MAX_VERIFICATIONS} checks used)`);
       }
       events.push(event);
       appendFileSync(jsonlPath, JSON.stringify(event) + "\n");

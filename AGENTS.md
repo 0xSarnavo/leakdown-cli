@@ -32,8 +32,9 @@ brew install ffmpeg               # one time — playable video.mp4 per session 
 ```
 
 Requirements: Node 20+, and at least one AI CLI logged in via subscription (no API keys):
-- `claude` (Claude Code)
-- `opencode` (opencode)
+- `claude` (Claude Code) — `npm i -g @anthropic-ai/claude-code`
+- `codex` (Codex) — `npm i -g @openai/codex`
+- `opencode` (opencode) — `npm i -g opencode-ai`
 
 **Verify environment (runs automatically on first visit):**
 
@@ -51,7 +52,18 @@ LEAKDOWN_IMAP_HOST="imap.gmail.com"
 LEAKDOWN_IMAP_USER="you@gmail.com"
 LEAKDOWN_IMAP_PASS="xxxx xxxx xxxx xxxx"   # Gmail app password
 LEAKDOWN_MAIL_DOMAIN="yourdomain.com"      # domain with catch-all → your inbox
+LEAKDOWN_IMAP_PORT="993"                   # optional, non-Gmail hosts
+LEAKDOWN_IMAP_TLS="false"                  # optional, and only this exact word turns TLS off
 ```
+
+**Optional — an external judge for the yes/no rulings:**
+
+```
+LEAKDOWN_JUDGE="/path/to/module.js"   # must export createJudge(); see src/brain/judge.ts
+```
+
+Unset, the brain answers them. A judge that is missing or failing never ends a
+session: each ruling it cannot make falls back to the inconclusive path.
 
 Legacy `CLIENTSIM_*` vars still work for one minor with a deprecation warning — use `LEAKDOWN_*`.
 
@@ -102,14 +114,14 @@ leakdown site-a.dev --yes            # the lot, asking nothing
 leakdown site-a.dev --stop personas  # just read it and build prospects
 ```
 
-Point it at a site and five stages run in order:
+Point it at a site and six stages run in order:
 
 | Stage | Does | Writes |
 |---|---|---|
 | `site` | Scrapes the landing page: what it sells, to whom, its CTA, signup path, visible pricing, walls, what a first-timer trips on | `runs/<site>/SITE.md` |
 | `map` | Crawls two clicks from the landing page plus `sitemap.xml`, no brain: every internal page tagged by kind, and every booking or payment surface, on-site or off. The aggregate later lists pages no prospect found | `runs/<site>/MAP.md`, `map.json` |
 | `personas` | Builds a prospect set fitted to that product (`--count`, default 10), spread across core / adjacent / edge; `--flow "<intent>"` drafts the checkpoints the set is shaped around | `runs/<site>/personas/`, `FLOW.md` |
-| `visit` | One session per persona — one at a time by default (`--serial`; `--parallel` runs a multi-persona queue all at once; omit both flags and it asks), desktop unless `--mobile` — live thought stream (lines prefixed by persona id), ending COMPLETED / ABANDONED / GUARDRAIL / COULD NOT RUN | `session.jsonl`, `report.md`, `video.mp4` (+ `video.webm`), `filmstrip.html` |
+| `visit` | One session per persona — one at a time by default (`--serial`; `--parallel` runs a multi-persona queue all at once; omit both flags and it asks), desktop unless `--mobile` — live thought stream (lines prefixed by persona id), ending COMPLETED / ABANDONED / GUARDRAIL / COULD NOT RUN | `session.jsonl`, `verifications.jsonl`, `meta.json`, `report.md`, `video.mp4` (+ `video.webm`), `filmstrip.html` |
 | `report` | The short report an owner reads — one number, the walls with quotes and "check it yourself" steps, a developer section — plus every table behind it | `runs/<site>/AGGREGATE.md`, `DETAIL.md` |
 | `fix` | Expert panel over each session | `FIXES.md` per session |
 
@@ -344,7 +356,7 @@ How it works:
    - `edge` — people who land on the site but are not the target: no budget, wrong
      use case, a competitor evaluating, an enterprise buyer in a self-serve flow.
      These expose whether onboarding qualifies people fast or wastes their time.
-4. Writes each as `personas/<id>.yaml` (review/edit freely; delete to remove) and prints a coverage summary
+4. Writes each as `runs/<site>/personas/<id>.yaml` (review/edit freely; delete to remove) and prints a coverage summary — only the legacy `personas generate` subcommand writes to the global `personas/`
 
 The set is also spread across circumstances that decide whether onboarding works
 at all — tech comfort (at least one `low`), urgency, trust posture, price
@@ -464,6 +476,8 @@ runs/
     FLOW.md, analytics.json      # the flow under test; the owner's real-visitor numbers (optional)
     flows/                       # this site's hand-written flows (--flow-file); global ones live in ./flows/
     COMPARE.md                   # --compare: the newest run of each --variant, side by side
+    VERDICTS.md                  # one `?:` line per wall — mark `real:` or `false:` and the next report counts it
+    MAIL-WARNING.md              # written when two prospects blame email and the mailbox probe failed
     RUN.md, AGGREGATE.md, DETAIL.md, VERIFIED.md, REPORT.md   # copies of the newest run's files
     <YYYY-MM-DD>/<HH-MM-SS>/     # one run = one CLI invocation (<HH-MM-SS>--<variant> for an A/B run)
       RUN.md                     # which model sat in which seat, how sessions ended, tokens, minutes
@@ -476,6 +490,7 @@ runs/
         AGGREGATE.md, DETAIL.md  # the same two reports over this model's sessions only
         <HH-MM-SS>-<persona>/
           session.jsonl          # one event per step: url, thought, emotion, confusion, action
+          verifications.jsonl    # one line per completion claim: the page the judge read, and its verdict
           shots/                 # step screenshots
           video.mp4              # playable recording (H.264, needs ffmpeg) + video.webm fallback
           filmstrip.html           # every step's screenshot with its thought, no video needed
@@ -564,7 +579,7 @@ Stage 2 reads `meta.json` and `session.jsonl` off disk — it never sees a live
 
 ## The session loop
 
-`runSession()` in `src/session.ts:35`. One `for` over `persona.patience_steps`:
+`runSession()` in `src/session.ts:62`. One `for` over `persona.patience_steps`:
 
 1. `driver.snapshot()` — accessibility YAML for the page **and all its frames**, the URL, `scrollY`, and where every ref sits relative to the viewport
 2. `driver.screenshotPath(step)`
@@ -573,17 +588,20 @@ Stage 2 reads `meta.json` and `session.jsonl` off disk — it never sees a live
 5. act, then append the `StepEvent` to `session.jsonl` **at the end of the step**,
    so the email override and any action failure make it into the file
 
-Four exits:
+Four exit kinds:
 
 | Exit | Trigger |
 |---|---|
-| `completed` | `complete` action, then `verifyGoal()` agrees (`MAX_VERIFICATIONS = 2`) |
+| `completed` | `complete` action, then the verification agrees (`MAX_VERIFICATIONS = 2` per session) |
 | `abandoned` | `abandon` action — the persona gives its reason |
-| `guardrail` | `stuckPattern()` fires, the page becomes unreadable, or the brain fails |
-| `guardrail` | patience runs out, or the wall-clock budget does (`--time`, default 20m — waiting on mail and `wait` actions is excluded, the same logic that made scrolling free) |
+| `guardrail` | `stuckPattern()` fires, the page becomes unreadable, patience runs out, or the wall-clock budget does (`--time`, default 20m — waiting on mail and `wait` actions is excluded, the same logic that made scrolling free) |
+| `couldnotrun` | our side, not the site's: an unreachable URL, a brain that fails at any step, or a setup failure before the session (mailbox, browser). Counted apart everywhere, and `--goal` exits 2 on it |
 
 A persona claiming `complete` without verification does not end the session — the
-loop `continue`s with a note, because personas are wrong about being done.
+loop `continue`s with a note, because personas are wrong about being done. The
+exception is the claim after the budget is spent: `MAX_VERIFICATIONS` completion
+claims are checked, and a later one ends the session `completed` unchecked, noted
+as such in `verifications.jsonl`.
 
 ## Module map
 
@@ -601,6 +619,7 @@ loop `continue`s with a note, because personas are wrong about being done.
 | `src/browser/audit.ts` | Mechanical page checks per snapshot: controls with no accessible name, tap targets under 24px, sideways overflow, viewport meta. Recorded once per URL on the step event; the report unions them per page | Adding a measurable check |
 | `src/browser/prune.ts` | `pruneSnapshot()` machine-noise removal, and `splitByViewport()` — what a person can see vs an outline of what is below | Changing what the persona perceives of a page |
 | `src/brain/index.ts` | `getBrain()` — name to adapter | Registering a brain |
+| `src/brain/judge.ts` | The optional external judge: the `Judge` interface and `loadJudge()` behind `LEAKDOWN_JUDGE`. Null everywhere it cannot answer, so the brain path is what runs without one | Changing what a judge is asked to rule on |
 | `src/brain/prompt.ts` | `buildSystemPrompt()` (static, cached by the CLI) and `buildUserPrompt()` (per step); `fenceSafe()`, repair and verification prompts, history tiering | Changing what a persona sees — keep per-step facts out of the system half |
 | `src/brain/catalog.ts` | `BRAIN_SPECS`, live model and effort probing | Making a new brain appear in the picker |
 | `src/brain/picker.ts` | Resolving brain/model/effort from flags or menus, and validating them | Adding a brain-related flag |
@@ -625,6 +644,10 @@ loop `continue`s with a note, because personas are wrong about being done.
 | `src/log/pdf.ts` | `--pdf`: one send-ready PDF per site from AGGREGATE.md + one model's FIXES.md | Changing the packet |
 | `src/experts/index.ts` | The `EXPERTS` registry | Registering an expert |
 | `src/experts/{ux,copywriter,reviewers,discoverability,scores}.ts` | One expert each, plus its renderer | Changing panel output |
+| `src/banner.ts` | The ASCII mark printed at startup — the same block the README opens with | Changing the first thing a user sees |
+| `src/version.ts` | `VERSION`, read from `package.json` at runtime so it cannot drift | Never; it has no knobs |
+| `src/browser/video.ts` | `findFfmpeg()` and the webm→mp4 transcode, system ffmpeg first, Playwright's bundled copy second | Changing what a recording is |
+| `src/experts/types.ts` | The `Expert` interface and the shared renderers every panel uses | Changing what an expert receives |
 | `src/ui/prompt.ts` | Zero-dependency `select` / `multiselect` / `text` over a raw-mode TTY | Adding a menu |
 
 ## Invariants and tripwires
@@ -643,11 +666,11 @@ Seventeen things that will bite you. Most were paid for once already — see
    `ariaYaml`, or a confirmation scrolled out of view becomes a false drop-off.
 4. **Sessions are immutable artifacts.** Regenerate with `--force`. Never re-visit
    a site to "fix" a bad report.
-5. **The three structural defences under [Safety](#safety) carry more weight than
+5. **The two structural defences under [Safety](#safety) carry more weight than
    the label regexes do.** They read as incidental in the driver. Breaking one
    quietly removes the real ceiling on what a persona can do to a live site.
 6. **Short-maxlength fields need real keystrokes.** `needsKeystrokes()`
-   (`src/browser/driver.ts:21`) — `fill()` puts the whole string in a six-box OTP
+   (`src/browser/driver.ts:24`) — `fill()` puts the whole string in a six-box OTP
    input and only the first digit survives.
 7. **`extendEnv: false` is mandatory** when spawning a brain. execa v9 silently
    re-merges the parent env without it, and `spawnEnv()`'s allowlist stops meaning

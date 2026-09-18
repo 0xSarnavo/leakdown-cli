@@ -16,6 +16,7 @@ import { dirname } from "node:path";
 import { z } from "zod";
 import type { Brain, StepEvent } from "../types.js";
 import { extractJson } from "../brain/adapters/cli-brain.js";
+import type { Judge } from "../brain/judge.js";
 import { fenceSafe } from "../brain/prompt.js";
 import { RUNS_ROOT, siteSlug } from "../runs.js";
 
@@ -137,11 +138,12 @@ export async function scoreFlow(
   flow: Flow,
   events: StepEvent[],
   brain: Brain & { ask?(prompt: string): Promise<string> },
+  judge?: Judge,
 ): Promise<FlowScore | null> {
-  if (!brain.ask || events.length === 0) return null;
-  const trail = events
-    .map((e) => `step ${e.n} [${e.url}]: "${e.decision.thought}" -> ${e.decision.action.type}${e.note ? ` (${e.note})` : ""}`)
-    .join("\n");
+  if (events.length === 0) return null;
+  const trail = flowTrail(events);
+  if (judge) return judge.scoreFlow(flow.checkpoints, trail).catch(() => null);
+  if (!brain.ask) return null;
   try {
     const json = extractJson(await brain.ask(SCORE_PROMPT(flow.checkpoints, trail)));
     if (!json) return null;
@@ -152,4 +154,11 @@ export async function scoreFlow(
   } catch {
     return null;
   }
+}
+
+/** The journey as the judge and the brain both read it: one line per step. */
+export function flowTrail(events: StepEvent[]): string {
+  return events
+    .map((e) => `step ${e.n} [${e.url}]: "${e.decision.thought}" -> ${e.decision.action.type}${e.note ? ` (${e.note})` : ""}`)
+    .join("\n");
 }

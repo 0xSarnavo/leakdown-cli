@@ -9,6 +9,7 @@ import {
   BRAIN_SPECS,
   describeBrain,
   detectBrains,
+  installHelp,
   listEfforts,
   listModels,
 } from "./catalog.js";
@@ -52,7 +53,9 @@ async function assertInstalled(brain: string): Promise<void> {
     const others = available.filter((a) => a.installed).map((a) => a.spec.id);
     throw new Error(
       `Brain "${brain}" is not installed (no \`${found.spec.command} --version\` in PATH).` +
-        (others.length ? ` Installed: ${others.join(", ")} — pass --brain <one of those>.` : " Install Claude Code, Codex, or opencode first."),
+        (others.length
+          ? ` Installed: ${others.join(", ")} — pass --brain <one of those>.`
+          : `\nInstall one, then log in:\n${installHelp()}`),
     );
   }
 }
@@ -141,7 +144,7 @@ export async function resolveBrainChoice(
     const available = await withStatus("detecting installed AI CLIs...", detectBrains);
     if (!available.some((a) => a.installed)) {
       throw new Error(
-        "No AI CLI found in PATH. Install Claude Code, opencode, or Codex, then re-run.",
+        `No AI CLI found in PATH. Install one, log in, then re-run:\n${installHelp()}`,
       );
     }
 

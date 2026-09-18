@@ -27,7 +27,8 @@ until it is fixed.
   the tool at a live checkout and rely on it never buying anything.
 - The persona's brain reads whatever the target page shows. Text on a page can
   try to steer it. The brain runs with a restricted tool set, outside this
-  repository, with only the session folder writable, so a hostile page can
+  repository, with no write or shell tool at all — its own session folder is
+  opted in for reading screenshots, nothing more — so a hostile page can
   waste a session but should not reach your files. Treat any run against a site
   you do not control as untrusted input.
 - Verification emails go to throwaway addresses on a domain you configure.

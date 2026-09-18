@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync,
 import { basename, resolve } from "node:path";
 import { BrowserDriver } from "./browser/driver.js";
 import { getBrain } from "./brain/index.js";
+import { loadJudge } from "./brain/judge.js";
 import { PERSONAS } from "./persona/presets.js";
 import {
   PERSONAS_DIR,
@@ -18,6 +19,7 @@ import { stringify as stringifyYaml } from "yaml";
 import { goalExitCode, runSession } from "./session.js";
 import { tmpdir } from "node:os";
 import { VERSION } from "./version.js";
+import { banner } from "./banner.js";
 import { findFfmpeg } from "./browser/video.js";
 import { generateFilmstrip, generateReport, journeySeconds, watermark } from "./log/report.js";
 import { generateAggregate, generateDetail, loadSessions, renderVariants } from "./log/aggregate.js";
@@ -189,10 +191,10 @@ function setupMail(): { provider: MailProvider } | null {
 }
 
 function printUsage() {
-  console.log(`leakdown ${VERSION} — simulated prospects walk your signup and say where they gave up
-
-  Only run it against sites you own or have written permission to test. It creates
-  real accounts, triggers real emails and webhooks, and records what it sees.
+  console.log(banner());
+  console.log(`
+  It creates real accounts, triggers real emails and webhooks, and records what
+  it sees. Use a staging copy when you can.
 
   leakdown <url> --ladder --yes --headless   the full run, about an hour
   leakdown <url>                             a plain run, one model, menus for the rest
@@ -210,10 +212,12 @@ STAGES, in order:
   report    the report     -> runs/<site>/<date>/<time>/AGGREGATE.md (copied to runs/<site>/)
   fix       expert panel   -> FIXES.md per session
 
-  --ladder [--wide <spec>]    the full run: haiku visits every persona, the
-                              replication filter picks the sessions that agree, sonnet
-                              verifies those, opus re-walks the hardest persona and writes
-                              its report. --wide "haiku:5,opencode/<model>:5" splits the sweep.
+  --ladder [--wide <spec>]    the full run: the sweep visits every persona (half
+                              haiku, half a free opencode model when opencode is
+                              installed; --wide sets the split, --wide haiku is haiku
+                              only), the replication filter picks the sessions that
+                              agree, sonnet verifies up to three of those, opus
+                              re-walks the hardest persona and writes its report.
   --stop <stage>              end after that one (default: run them all)
   --flow "<intent>"           the flow to test, e.g. "signup through to the
                               dashboard" — checkpoints are drafted for review,
@@ -916,6 +920,8 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
       effort: common.effort,
       allowDir: sessionDir, // so the persona can read its own screenshots
     });
+    // one judge per session too, for the same reason: its tally is this session's
+    const judge = await loadJudge();
 
     const driver = new BrowserDriver();
     try {
@@ -943,6 +949,7 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
           tag,
           assertions: common.expect,
           stopWhen: flow?.stop,
+          judge: judge ?? undefined,
         }));
       } catch (e) {
         // goto timeout, dead preview, driver crash — our side, not the site's
@@ -952,7 +959,10 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
       }
 
       // one un-retried call per session: which flow checkpoints did it reach?
-      flowScore = flow && events.length > 0 ? await scoreFlow(flow, events, brain) : null;
+      flowScore =
+        flow && events.length > 0
+          ? await scoreFlow(flow, events, brain, judge ?? undefined)
+          : null;
       // the stop point is mechanical evidence — it outranks the scorer's reading of the trail
       if (flowScore && flow?.stop && exit.kind === "completed" && exit.summary.startsWith("Reached the flow's stop point"))
         flowScore[flow.stop.index] = { ...flowScore[flow.stop.index], reached: true, note: `page showed "${flow.stop.text}"` };
@@ -999,6 +1009,8 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
               // claude reports tokens/cost; opencode does not, so the eval also
               // has steps + wall-clock as a model-agnostic efficiency proxy
               usage: (brain as { usage?: unknown }).usage ?? null,
+              // an external judge is billed apart from the brain, so it is counted apart
+              usageJudge: judge?.usage ?? null,
               steps: events.length,
               durationSeconds: journeySeconds(events),
             },

@@ -44,3 +44,37 @@ describe("flow round-trip", () => {
     assert.deepEqual(back?.checkpoints, ["a b", "c"]);
   });
 });
+
+describe("scoreFlow with an external judge", () => {
+  const events = [
+    { n: 1, url: "https://example.com", timestamp: "", decision: { thought: "looking for signup", emotion: "interested", confusion: 0, action: { type: "click", target: "e1" } } },
+  ] as never;
+  const flow = { intent: "signup", checkpoints: ["found the signup CTA", "saw the dashboard"] };
+  const brain = { name: "x", decide: async () => ({}) as never };
+  /** A judge that answers with whatever it was handed, or fails outright. */
+  const stub = (score: { checkpoint: string; reached: boolean; note: string }[] | null) => ({
+    verifyGoal: async () => null,
+    judgeAssertions: async (r: never[]) => r,
+    scoreFlow: async () => score,
+  });
+
+  it("takes the judge's answer when one is configured", async () => {
+    const { scoreFlow } = await import("./flow.js");
+    const score = await scoreFlow(flow, events, brain, stub([
+      { checkpoint: "found the signup CTA", reached: true, note: "" },
+      { checkpoint: "saw the dashboard", reached: false, note: "" },
+    ]));
+    assert.deepEqual(score?.map((c) => c.reached), [true, false]);
+  });
+
+  it("a judge that cannot answer leaves the session unscored, not half-scored", async () => {
+    const { scoreFlow } = await import("./flow.js");
+    assert.equal(await scoreFlow(flow, events, brain, stub(null)), null);
+  });
+
+  it("a judge that throws does not take the session down", async () => {
+    const { scoreFlow } = await import("./flow.js");
+    const throwing = { ...stub(null), scoreFlow: async () => { throw new Error("judge down"); } };
+    assert.equal(await scoreFlow(flow, events, brain, throwing), null);
+  });
+});

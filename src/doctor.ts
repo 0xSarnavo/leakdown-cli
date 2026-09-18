@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { detectBrains } from "./brain/catalog.js";
+import { detectBrains, installHelp } from "./brain/catalog.js";
 import { findFfmpeg } from "./browser/video.js";
+import { banner } from "./banner.js";
 
 const STATE_FILE = ".leakdown-state.json";
 const STATE_MAX_AGE_MS = 7 * 24 * 3600_000; // re-verify weekly
@@ -222,6 +223,10 @@ function printQuickStart() {
 }
 
 export async function runDoctor(brainName = "claude", force = false): Promise<boolean> {
+  // the first command most people run after cloning, so it is where the CLI
+  // gets to look like the rest of the product for the first time
+  console.log(banner());
+  console.log("");
   const state = loadState();
 
   if (!force && state && stateIsFresh(state)) {
@@ -242,7 +247,7 @@ export async function runDoctor(brainName = "claude", force = false): Promise<bo
 
   if (installed.length === 0) {
     results.forEach((r) => console.log(`  ${r.ok ? "✓" : "✗"} ${r.name}: ${r.detail}`));
-    console.error(`\n  ✗ No AI CLI found. Install Claude Code, Codex, or opencode first.\n`);
+    console.error(`\n  ✗ No AI CLI found. Install one, then log in:\n${installHelp()}\n`);
     return false;
   }
 

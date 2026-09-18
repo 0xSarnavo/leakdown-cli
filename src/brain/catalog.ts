@@ -28,6 +28,24 @@ const DESCRIPTIONS: Record<string, string> = {
   opencode: "opencode",
 };
 
+/**
+ * How to get each one, so "not installed" is an instruction rather than a name
+ * to go and search for. Each still needs a login of its own afterwards.
+ */
+export const INSTALL_COMMANDS: Record<string, string> = {
+  claude: "npm i -g @anthropic-ai/claude-code",
+  codex: "npm i -g @openai/codex",
+  opencode: "npm i -g opencode-ai",
+};
+
+/** One line per CLI: what to run to install it. */
+export function installHelp(ids: string[] = BRAIN_SPECS.map((s) => s.id)): string {
+  return ids
+    .filter((id) => INSTALL_COMMANDS[id])
+    .map((id) => `    ${DESCRIPTIONS[id] ?? id}: ${INSTALL_COMMANDS[id]}`)
+    .join("\n");
+}
+
 /** Used only when a live probe returns nothing usable. */
 const FALLBACK_MODELS: Record<string, string[]> = {
   claude: ["opus", "sonnet", "haiku"],
