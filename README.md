@@ -1,18 +1,3 @@
-```
-          @
-        O @ .
-      O @ O o .
-      @ @ @ O O
-    @ @ @ @ O O o
-  @ @ @ @ @ O o : .
-  O @ @ O O O o : .
-  O O O O o o : . .
-  : o o o o : . . .
-    : : : : . . .
-      . . . . .
-          .
-```
-
 # Leakdown
 
 Simulated prospects walk through your website's signup in a real browser, think out loud, and quit the way people do. You get one page: where they stalled, in their words, with the element and a "check it yourself" line — and an expert layer that proposes the fix.
@@ -93,6 +78,7 @@ leakdown <url> --goal "apply SAVE20" --expect "total=$96.00" --yes     # the pag
 leakdown <url> --flow "signup through to the dashboard"               # checkpoints, scored per session
 leakdown <url> --flow-file signup                                     # your own flows/signup.yaml; --validate-flow checks it first
 leakdown <url> --persona marcus,marcus,marcus    # same persona three times
+leakdown <url> --model-for persona=sonnet --model-for expert=haiku    # one model per role, not one per run
 leakdown <url> --variant control --yes && leakdown <url2> --variant new --yes && leakdown --compare <site>   # A/B, ranked with intervals
 leakdown --history                               # every run, one line each, with its one number
 leakdown --report | --fix | --replication <site>  # a site name means its newest run; site/date/time names one
