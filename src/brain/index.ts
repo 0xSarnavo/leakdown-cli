@@ -1,5 +1,5 @@
 import type { Brain } from "../types.js";
-import type { BrainRole } from "./roles.js";
+import { modelForKey, type BrainRole, type ModelsByRole } from "./roles.js";
 import { createClaudeBrain } from "./adapters/claude.js";
 import { createOpencodeBrain } from "./adapters/opencode.js";
 import { createCodexBrain } from "./adapters/codex.js";
@@ -21,10 +21,18 @@ const FACTORIES: Record<string, (role: BrainRole) => Brain> = {
 export interface BrainOptions {
   model?: string;
   effort?: string;
-  /** Decides the tool policy — see adapters/claude.ts */
+  /** Decides the tool policy — see adapters/claude.ts — and which model answers */
   role?: BrainRole;
   /** Directory the CLI may read despite running outside the project (screenshots) */
   allowDir?: string;
+  /**
+   * Per-role model overrides (`--model-for persona=sonnet`). The role's own
+   * entry wins over `model`; a role with no entry is unchanged by this map, so
+   * an empty one leaves every call exactly where `--model` put it.
+   */
+  models?: ModelsByRole;
+  /** Which expert this is, so `--model-for expert:ux=sonnet` can single it out */
+  expertId?: string;
 }
 
 export function getBrain(name: string, opts: BrainOptions = {}): Brain {
@@ -32,8 +40,10 @@ export function getBrain(name: string, opts: BrainOptions = {}): Brain {
   if (!make) {
     throw new Error(`Unknown brain "${name}". Available: ${Object.keys(FACTORIES).join(", ")}`);
   }
-  const brain = make(opts.role ?? "persona");
-  if (opts.model) (brain as { model?: string }).model = opts.model;
+  const role = opts.role ?? "persona";
+  const brain = make(role);
+  const model = modelForKey(opts.models, role, opts.expertId) ?? opts.model;
+  if (model) (brain as { model?: string }).model = model;
   if (opts.effort) (brain as { effort?: string }).effort = opts.effort;
   if (opts.allowDir) (brain as { allowDir?: string }).allowDir = opts.allowDir;
   return brain;

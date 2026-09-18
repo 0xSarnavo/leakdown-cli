@@ -1,6 +1,6 @@
 {
   "name": "leakdown",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Synthetic client agents that walk through any website's onboarding like real humans, think out loud, and report where and why they drop off.",
   "type": "module",
   "bin": {

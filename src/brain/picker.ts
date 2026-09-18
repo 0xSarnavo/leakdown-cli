@@ -13,7 +13,9 @@ import {
   listEfforts,
   listModels,
 } from "./catalog.js";
+import { BRAIN_ROLES, isBrainRole, type ModelKey, type ModelsByRole } from "./roles.js";
 import { confirmed, isInteractive, select, text, type Choice } from "../ui/prompt.js";
+import { EXPERTS } from "../experts/index.js";
 
 export interface BrainChoice {
   brain: string;
@@ -33,6 +35,73 @@ const USE_CUSTOM = " custom";
  * as a guardrail exit. The same `--version` probe the picker menu uses decides
  * it up front.
  */
+/**
+ * Expert ids, for validating `expert:<id>`. Read from the registry, so an
+ * expert added there is pinnable without touching this file.
+ */
+const EXPERT_IDS = EXPERTS.map((e) => e.id);
+
+/**
+ * A model id as every brain spells one: `haiku`, `gpt-5.2-codex`,
+ * `opencode/muse-spark-1.3-contributor-free`. Nothing with whitespace, a quote
+ * or a newline in it — the value is handed to a spawned CLI.
+ */
+const MODEL_SHAPE = /^[A-Za-z0-9._:/-]{1,100}$/;
+
+/**
+ * Parse `--model-for <role>=<model>` (repeatable) and the `LEAKDOWN_MODELS`
+ * equivalent (`persona=sonnet,expert=haiku`) into a map.
+ *
+ * Called from `parseCommon`, before a browser or a mailbox exists: a typo in a
+ * role name is a message, not a run that dies four minutes in having already
+ * minted an inbox (invariant 9). Returns undefined when nothing was given, so
+ * an absent map is distinguishable from an empty one.
+ */
+export function parseModelMap(entries: string[]): ModelsByRole | undefined {
+  const pairs = entries.flatMap((e) => e.split(",")).map((e) => e.trim()).filter(Boolean);
+  if (pairs.length === 0) return undefined;
+
+  const map: ModelsByRole = {};
+  for (const pair of pairs) {
+    const eq = pair.indexOf("=");
+    if (eq < 1) {
+      throw new Error(
+        `Invalid --model-for "${pair}". Write it as <role>=<model>, e.g. persona=sonnet.`,
+      );
+    }
+    const role = pair.slice(0, eq).trim();
+    const model = pair.slice(eq + 1).trim();
+    // `expert:<id>` pins one expert; the id is checked against the registry so a
+    // typo is caught here rather than silently never matching an expert
+    const expert = role.startsWith("expert:") ? role.slice("expert:".length) : null;
+    if (expert !== null) {
+      if (!EXPERT_IDS.includes(expert)) {
+        throw new Error(
+          `Unknown expert "${expert}" in --model-for. Experts: ${EXPERT_IDS.join(", ")}.`,
+        );
+      }
+    } else if (!isBrainRole(role)) {
+      throw new Error(
+        `Unknown role "${role}" in --model-for. Roles: ${BRAIN_ROLES.join(", ")}, or expert:<id>.`,
+      );
+    }
+    if (!MODEL_SHAPE.test(model)) {
+      throw new Error(
+        `Invalid model "${model}" for role "${role}". A model id is one word, like sonnet or opencode/some-model.`,
+      );
+    }
+    map[role as ModelKey] = model;
+  }
+  return map;
+}
+
+/** `persona=sonnet expert=haiku`, for the run banner and meta.json. */
+export function describeModelMap(map: ModelsByRole | undefined): string {
+  if (!map) return "";
+  const keys = [...BRAIN_ROLES, ...EXPERT_IDS.map((id) => `expert:${id}` as ModelKey)];
+  return keys.filter((k) => map[k]).map((k) => `${k}=${map[k]}`).join(" ");
+}
+
 /**
  * Codex takes the effort as `-c model_reasoning_effort="<value>"`, so a value
  * carrying a quote or a newline would set unrelated config keys. Every real

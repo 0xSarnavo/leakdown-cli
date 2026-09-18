@@ -1,4 +1,5 @@
 import type { Brain, ExitReason, Persona, StepEvent } from "../types.js";
+import type { Judge } from "../brain/judge.js";
 
 export interface ExpertContext {
   persona: Persona;
@@ -15,7 +16,12 @@ export interface ExpertContext {
 export interface Expert {
   id: string;
   title: string;
-  run(ctx: ExpertContext, brain: Brain): Promise<string | null>;
+  /**
+   * `judge` is passed when one is configured. Only an expert with a number in
+   * its output has any use for it; the prose ones ignore it, and every expert
+   * must still work when it is absent.
+   */
+  run(ctx: ExpertContext, brain: Brain, judge?: Judge): Promise<string | null>;
 }
 
 const OPEN = "<<<UNTRUSTED SESSION TRANSCRIPT>>>";

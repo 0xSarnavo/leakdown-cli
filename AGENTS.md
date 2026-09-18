@@ -101,6 +101,37 @@ models, **custom…** to type any id.
 in scripts and CI so runs are reproducible; a session records the brain, model,
 and effort it used in `meta.json`.
 
+### One model per role
+
+`--model` pins every call to one model. Not every call wants the same one: the
+session loop is one call per step and the only prose a reader sees, while the
+site brief, the flow draft and the persona set are schema-validated JSON — the
+same reply from any model that can hold the shape.
+
+`--model-for <role>=<model>` pins one role and leaves the rest on `--model`.
+Repeatable, and `LEAKDOWN_MODELS=persona=sonnet,expert=haiku` does the same from
+the environment (a flag for the same role wins).
+
+| Role | The call | Per run |
+|---|---|---|
+| `persona` | the session loop, `brain.decide()` | one per step |
+| `brief` | read the landing page into `SITE.md` | one, cached per site |
+| `flow` | draft a flow's checkpoints from an intent | one |
+| `personagen` | write the persona set | one per site |
+| `scores` | the Conversion Scorecard | one per session reviewed |
+| `expert` | the other six panel agents | six per session reviewed |
+| `expert:<id>` | one named expert — `expert:ux`, `expert:seo` | pins that one alone |
+
+`expert:<id>` falls back to `expert`, which falls back to `--model`, which falls
+back to the CLI's own default. An expert added to the registry inherits `expert`
+and needs no change to `roles.ts`. Every key and model id is validated in
+`parseModelMap` (`src/brain/picker.ts`) at flag-parse time, per invariant 9.
+
+With no `--model-for` anywhere the run is exactly what it was before the map
+existed. A tiered run says so on its banner, records the resolved map in
+`meta.json` as `modelFor`, and is filed under the persona's model —
+`wide/sonnet/`, not `wide/claude/`, so two arms of an A/B stay apart.
+
 **Zero-argument wizard:** running bare `leakdown` opens a guided flow
 (what to do → url → how far to go → brain → model → effort → who visits).
 `--help` still prints the flag reference. Ctrl-C out of any menu exits cleanly
@@ -652,7 +683,7 @@ as such in `verifications.jsonl`.
 
 ## Invariants and tripwires
 
-Seventeen things that will bite you. Most were paid for once already — see
+Eighteen things that will bite you. Most were paid for once already — see
 [DECISIONS.md](DECISIONS.md).
 
 1. **`dist/` is build output.** Never edit it. `npm test` runs `tsc` first and then
@@ -704,7 +735,12 @@ Seventeen things that will bite you. Most were paid for once already — see
     connection is stateful, and concurrent polls through a shared one interleave
     on a single socket. Session dirs are minted serially before launch because
     `sessionPath()`'s same-second suffix check is exists-then-create.
-17. **Reports say risk, not measurement.** A simulated prospect stalling is a
+17. **A new `BrainRole` must be classified in `toolPolicy()`.** There are exactly
+    two tool policies and adding a role does not add a third. Letting a new role
+    fall to the expert bucket widens what site text can reach, which is
+    invariant 5 by another route. Roles are model-selection keys first; the tool
+    surface is a deliberate second decision.
+18. **Reports say risk, not measurement.** A simulated prospect stalling is a
     signal that real visitors could; render it that way ("people may stall
     here"), never as observed traffic. The framing lives in the renderers and
     the expert prompts — the exit kinds on disk are unchanged, so old sessions
@@ -717,6 +753,9 @@ Seventeen things that will bite you. Most were paid for once already — see
 - **A brain** — adapter in `src/brain/adapters/` (build on `makeCliBrain`), wire into
   `src/brain/index.ts`, and add a `BrainSpec` to `src/brain/catalog.ts` or it will not
   show up in the picker
+- **A role** — add it to `BRAIN_ROLES` in `src/brain/roles.ts`, classify it in
+  `toolPolicy()` (invariant 17), and pass it at the call site via `brainFor()`. A
+  role nothing passes is a flag that silently does nothing
 - **A mail provider** — implement `MailProvider` from `src/mail/types.ts`
 - **A menu** — `select` / `multiselect` / `text` from `src/ui/prompt.ts`. They return
   silent defaults when there is no TTY, so nothing hangs in CI

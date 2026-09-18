@@ -6,6 +6,33 @@ tags `v<version>`, and publishes the same text as a GitHub Release.
 
 ## Unreleased
 
+## 0.8.1 — 2026-09-19
+
+**One model per role, not one per run.** `--model-for <role>=<model>` pins a
+single kind of call and leaves the rest on `--model`; repeatable, and
+`LEAKDOWN_MODELS=persona=sonnet,expert=haiku` does the same from the
+environment. Roles are `persona`, `brief`, `flow`, `personagen`, `scores`,
+`expert`, and `expert:<id>` for one named expert. The session loop is one call
+per step and the only prose a reader sees, while the brief, the flow draft and
+the persona set are schema-validated JSON — there is no reason they should cost
+the same. With no `--model-for` anywhere, a run is exactly what it was before.
+A tiered run prints its map, records it in `meta.json` as `modelFor`, and is
+filed under the persona's model so two arms of an A/B stay in separate folders.
+
+**A judge can supply the Conversion Scorecard's numbers.** A `LEAKDOWN_JUDGE`
+module that implements the new optional `scoreDimensions()` scores the five
+dimensions and the model writes only the notes. A prose model re-reading the
+same journey scores it 6 one day and 8 the next, which is larger than the
+difference most A/B arms show; a judge answers on one scale, so the numbers can
+be subtracted. All five or none — a half-judged card is on two scales at once.
+Judges without the method, which is every judge written before this release,
+are unaffected.
+
+**`LEAKDOWN_JUDGE` must be an absolute path.** It is imported and executed, so a
+relative path — which would resolve against the current directory, where a repo
+under test could have planted a file — is refused with a warning and the run
+continues without a judge.
+
 ## 0.8.0 — 2026-09-18
 
 **The yes/no rulings can come from somewhere else.** Three of this tool's

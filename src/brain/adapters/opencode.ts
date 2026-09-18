@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeCliBrain } from "./cli-brain.js";
-import type { BrainRole } from "../roles.js";
+import { toolPolicy, type BrainRole } from "../roles.js";
 
 /**
  * Personas ingest hostile page/email content, so their tool surface is denied
@@ -22,17 +22,21 @@ const DENY_CONFIG = {
   },
 } as const;
 
-const configPaths: Partial<Record<BrainRole, string>> = {};
+type Policy = keyof typeof DENY_CONFIG;
 
+const configPaths: Partial<Record<Policy, string>> = {};
+
+/** Keyed by tool policy, not by role: there are two configs, however many roles. */
 function writeDenyConfig(role: BrainRole): string {
-  // one shared config per role per process (unique 0700 dir: another local user
+  const policy: Policy = toolPolicy(role);
+  // one shared config per policy per process (unique 0700 dir: another local user
   // must not be able to pre-plant this file)
-  let path = configPaths[role];
+  let path = configPaths[policy];
   if (!path) {
     const dir = mkdtempSync(join(tmpdir(), "leakdown-oc-"));
-    path = join(dir, `${role}-permissions.json`);
-    writeFileSync(path, JSON.stringify(DENY_CONFIG[role] ?? DENY_CONFIG.persona));
-    configPaths[role] = path;
+    path = join(dir, `${policy}-permissions.json`);
+    writeFileSync(path, JSON.stringify(DENY_CONFIG[policy]));
+    configPaths[policy] = path;
   }
   return path;
 }

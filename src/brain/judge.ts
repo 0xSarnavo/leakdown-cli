@@ -28,6 +28,17 @@ export interface Judge {
    * judge that cannot answer returns it unchanged.
    */
   judgeAssertions(results: AssertionResult[], ariaYaml: string): Promise<AssertionResult[]>;
+  /**
+   * Score named dimensions from 0 to 1, judging by the journey. Null: could not
+   * say, and the caller scores them the way it does with no judge at all.
+   *
+   * Optional, unlike the three above: a judge that does not implement it is a
+   * judge, and the panel simply keeps its own numbers.
+   */
+  scoreDimensions?(
+    dimensions: { id: string; question: string }[],
+    trail: string,
+  ): Promise<Record<string, number> | null>;
   /** Whatever the judge wants recorded on the session, written to meta.json as `usageJudge`. */
   usage?: unknown;
 }

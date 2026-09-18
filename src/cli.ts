@@ -4,6 +4,7 @@ import { basename, resolve } from "node:path";
 import { BrowserDriver } from "./browser/driver.js";
 import { getBrain } from "./brain/index.js";
 import { loadJudge } from "./brain/judge.js";
+import type { BrainRole, ModelsByRole } from "./brain/roles.js";
 import { PERSONAS } from "./persona/presets.js";
 import {
   PERSONAS_DIR,
@@ -32,7 +33,7 @@ import { extractCodes, extractLinks } from "./mail/types.js";
 import { runDoctor, doctorStateExists, recentMailProbe, saveMailProbe, type MailProbe } from "./doctor.js";
 import { execa } from "execa";
 import { createInterface } from "node:readline/promises";
-import { resolveBrainChoice } from "./brain/picker.js";
+import { describeModelMap, parseModelMap, resolveBrainChoice } from "./brain/picker.js";
 import {
   PromptCancelled,
   confirmed,
@@ -252,6 +253,9 @@ WHO GOES IN:
 HOW IT RUNS:
   --brain <claude|opencode|codex>   which AI CLI plays the client
   --model <name>              pin the model (lists are read live from the CLI)
+  --model-for <role>=<model>  pin one role's model, overriding --model for it.
+                              Repeatable, or LEAKDOWN_MODELS=persona=sonnet,expert=haiku
+                              Roles: persona, expert, scores, brief, flow, personagen
   --effort <level>            reasoning effort (claude: low..max, codex: low|medium|high)
   --time <minutes>            wall-clock ceiling per session (default 20; waiting
                               on mail and pauses is excluded — slow mail is not
@@ -296,6 +300,8 @@ interface CommonArgs {
   /** undefined until --brain is passed or the picker resolves it */
   brain?: string;
   model?: string;
+  /** per-role model overrides (`--model-for persona=sonnet`); wins over `model` */
+  modelFor?: ModelsByRole;
   effort?: string;
   headless: boolean;
   mobile?: boolean;
@@ -337,6 +343,8 @@ interface CommonArgs {
 
 function parseCommon(argv: string[]): CommonArgs {
   const args: CommonArgs = { headless: false, mobile: false };
+  // repeatable, and merged with LEAKDOWN_MODELS below
+  const modelForEntries: string[] = [];
   /** Value flags: a trailing `--persona` used to throw a raw TypeError here. */
   const value = (i: number, flag: string): string => {
     const v = argv[i];
@@ -407,6 +415,7 @@ function parseCommon(argv: string[]): CommonArgs {
     }
     else if (a === "--brain") args.brain = value(++i, a);
     else if (a === "--model") args.model = value(++i, a);
+    else if (a === "--model-for") modelForEntries.push(value(++i, a));
     else if (a === "--effort") args.effort = value(++i, a);
     else if (a === "--stop") {
       const s = value(++i, a);
@@ -422,6 +431,14 @@ function parseCommon(argv: string[]): CommonArgs {
     else if (a === "--plan") args.plan = true;
     else if (a === "--no-map") args.noMap = true;
     else if (a === "--yes" || a === "-y") args.yes = true;
+  }
+  // the env is the floor, flags the override: a --model-for for the same role wins
+  const fromEnv = process.env.LEAKDOWN_MODELS ?? "";
+  try {
+    args.modelFor = parseModelMap([fromEnv, ...modelForEntries]);
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(1);
   }
   return args;
 }
@@ -731,11 +748,29 @@ async function resolveRunPlan(
 }
 
 /**
+ * A brain for one role, once the choice has been resolved.
+ *
+ * Every stage goes through this rather than building its own options object, so
+ * a role that is missing from the map lands on `--model` and the run is exactly
+ * what it was before the map existed.
+ */
+function brainFor(common: CommonArgs, role: BrainRole, allowDir?: string, expertId?: string) {
+  return getBrain(common.brain ?? "claude", {
+    model: common.model,
+    models: common.modelFor,
+    effort: common.effort,
+    role,
+    allowDir,
+    expertId,
+  });
+}
+
+/**
  * Resolve the brain for a stage, prompting for whatever the flags left open.
  * Mutates `common` so chained stages (all -> fix) reuse the same answers
  * instead of asking again.
  */
-async function resolveBrain(common: CommonArgs, purpose?: string) {
+async function resolveBrain(common: CommonArgs, purpose?: string, role: BrainRole = "persona") {
   try {
     if (!common.brainResolved) {
       const choice = await resolveBrainChoice(
@@ -747,7 +782,7 @@ async function resolveBrain(common: CommonArgs, purpose?: string) {
       common.effort = choice.effort;
       common.brainResolved = true;
     }
-    return getBrain(common.brain ?? "claude", { model: common.model, effort: common.effort });
+    return brainFor(common, role);
   } catch (e) {
     if (e instanceof PromptCancelled) throw e;
     console.error((e as Error).message);
@@ -759,13 +794,19 @@ async function resolveBrain(common: CommonArgs, purpose?: string) {
 function describeRun(common: CommonArgs): string {
   const parts = [`brain: ${common.brain ?? "claude"}`];
   if (common.model) parts.push(`model: ${common.model}`);
+  // a tiered run must say so on the banner, or a cheap answer looks like a dear one
+  const tiered = describeModelMap(common.modelFor);
+  if (tiered) parts.push(`per role: ${tiered}`);
   if (common.effort) parts.push(`effort: ${common.effort}`);
   return parts.join(" | ");
 }
 
 /** STAGE 1 — spawn persona visits. Returns created session dirs. */
 async function visit(url: string, common: CommonArgs): Promise<string[]> {
-  const planningBrain = await resolveBrain(common, "Which AI plays the client?");
+  // resolves brain/model/effort once for the whole run; each planning stage
+  // below then gets its own brain under its own role, so --model-for can send
+  // the brief, the flow draft and the persona set to different models
+  await resolveBrain(common, "Which AI plays the client?");
 
   // first-run initialization check (skipped silently once verified)
   if (!doctorStateExists()) {
@@ -785,7 +826,7 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
   // the brief comes first, and comes even when --persona was passed: it is the
   // ICP the persona set is built from, and the prior knowledge warm/hot arrive with
   stageBanner("site", common.stop);
-  await prepareSite(url, common, planningBrain);
+  await prepareSite(url, common, brainFor(common, "brief"));
   const blocked = blockedReason(url);
   if (blocked) {
     console.log(
@@ -798,17 +839,17 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
     return [];
   }
   stageBanner("map", common.stop);
-  await prepareMap(url, common, planningBrain);
+  await prepareMap(url, common, brainFor(common, "brief"));
   if (!runsThrough("personas", common.stop)) {
     console.log(`  Stopped after the map. See runs/${siteSlug(url)}/MAP.md\n`);
     return [];
   }
-  const flow = await prepareFlow(url, common, planningBrain);
+  const flow = await prepareFlow(url, common, brainFor(common, "flow"));
 
   stageBanner("personas", common.stop);
   const generated = common.personas?.length
     ? []
-    : await prepareSitePersonas(url, common, planningBrain, flow);
+    : await prepareSitePersonas(url, common, brainFor(common, "personagen"), flow);
   if (!runsThrough("visit", common.stop)) {
     console.log(`  Stopped after building personas. See runs/${siteSlug(url)}/personas/\n`);
     return [];
@@ -868,7 +909,11 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
   // check is exists-then-create, which two concurrent starts would race
   common.runDir ??= newRunDir(url, new Date(), RUNS_ROOT, common.variant);
   const runs = personaIds.map((pid, i) => {
-    const sessionDir = sessionPath(common.runDir!, common.seat ?? "wide", common.model ?? common.brain, pid);
+    // the folder is named for the model that produced the session, which under
+    // a per-role map is the persona's — not `--model`, which a tiered run may
+    // never set. Naming it "claude" would put two arms of an A/B in one folder.
+    const sessionModel = common.modelFor?.persona ?? common.model ?? common.brain;
+    const sessionDir = sessionPath(common.runDir!, common.seat ?? "wide", sessionModel, pid);
     mkdirSync(`${sessionDir}/shots`, { recursive: true });
     return { pid, sessionDir, n: i + 1 };
   });
@@ -915,11 +960,7 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
 
     // fresh brain per persona — a shared one would carry the previous
     // persona's whole conversation into this one's first impression
-    const brain = getBrain(common.brain ?? "claude", {
-      model: common.model,
-      effort: common.effort,
-      allowDir: sessionDir, // so the persona can read its own screenshots
-    });
+    const brain = brainFor(common, "persona", sessionDir); // allowDir: its own screenshots
     // one judge per session too, for the same reason: its tally is this session's
     const judge = await loadJudge();
 
@@ -999,6 +1040,8 @@ async function visit(url: string, common: CommonArgs): Promise<string[]> {
               brain: brain.name,
               version: VERSION,
               model: common.model ?? null,
+              // which model answered which role — a run that was tiered says so
+              modelFor: common.modelFor ?? null,
               effort: common.effort ?? null,
               exit,
               viewport: common.mobile ? "mobile" : "desktop",
@@ -1437,7 +1480,7 @@ const VERIFIER = "sonnet";
 const WRITER = "opus";
 async function ladder(url: string, common: CommonArgs): Promise<void> {
   const base: CommonArgs = { ...common, yes: true, brainResolved: true, brain: "claude", stop: "visit" };
-  const brainFor = (model: string) => (model.includes("/") ? model.split("/")[0] : "claude");
+  const brainNameFor = (model: string) => (model.includes("/") ? model.split("/")[0] : "claude");
   // default is half haiku, half muse-spark (free): measured 2026-09-14, muse runs
   // full sessions with the harness fixes and its trails are replication votes
   const { detectBrains } = await import("./brain/catalog.js");
@@ -1465,7 +1508,7 @@ async function ladder(url: string, common: CommonArgs): Promise<void> {
     dirs.push(...reuse);
   } else {
     // the first visit builds the brief, the map and the personas if they are missing
-    const first = await visit(url, { ...base, brain: brainFor(groups[0].model), model: groups[0].model, stop: "personas" });
+    const first = await visit(url, { ...base, brain: brainNameFor(groups[0].model), model: groups[0].model, stop: "personas" });
     void first;
     const ids = common.personas?.length ? common.personas : Object.keys(siteOwnPersonas(url));
     let at = 0;
@@ -1473,7 +1516,7 @@ async function ladder(url: string, common: CommonArgs): Promise<void> {
       const slice = g.n ? ids.slice(at, at + g.n) : ids.slice(at);
       at += slice.length;
       if (!slice.length) continue;
-      dirs.push(...(await visit(url, { ...base, brain: brainFor(g.model), model: g.model, personas: slice })));
+      dirs.push(...(await visit(url, { ...base, brain: brainNameFor(g.model), model: g.model, personas: slice })));
     }
   }
   if (!dirs.length) return;
@@ -1569,7 +1612,7 @@ async function fix(dirs: string[], common: CommonArgs, force = false, outDir?: s
   }
 
   // resolves the brain/model/effort choice; each expert then gets its own instance
-  await resolveBrain(common, "Which AI runs the expert panel?");
+  await resolveBrain(common, "Which AI runs the expert panel?", "expert");
 
   for (const s of sessions) {
     // the verifier seat writes beside the run, not into the session it reviewed
@@ -1596,17 +1639,16 @@ async function fix(dirs: string[], common: CommonArgs, force = false, outDir?: s
     let panelDone = 0;
 
     const briefText = loadBrief(s.meta.url) ?? undefined;
+    // one judge for the panel, for the same reason the session gets one: the
+    // tally is this panel's. Null when none is configured, and every expert
+    // works without it.
+    const panelJudge = await loadJudge();
     // the experts are independent — each its own brain, each returns one
     // section — so they run at once. No spinner: concurrent clearLine races.
     const results = await Promise.all(
       EXPERTS.map(async (expert) => {
         // fresh brain per expert — independent verdicts, not a group conversation
-        const expertBrain = getBrain(common.brain ?? "claude", {
-          model: common.model,
-          effort: common.effort,
-          role: "expert",
-          allowDir: s.dir,
-        });
+        const expertBrain = brainFor(common, expert.id === "scores" ? "scores" : "expert", s.dir, expert.id);
         const section = await expert
           .run(
             {
@@ -1619,6 +1661,7 @@ async function fix(dirs: string[], common: CommonArgs, force = false, outDir?: s
               brief: briefText,
             },
             expertBrain,
+            panelJudge ?? undefined,
           )
           .catch((e) => {
             console.log(`  [${expert.id}] failed: ${(e as Error).message.split("\n")[0]}`);
@@ -1938,7 +1981,7 @@ async function mailtest() {
 
 /** Generate a persona graph from a description (+ optional site scrape) */
 async function personasGenerate(rest: string[]) {
-  const brain = await resolveBrain(parseCommon(rest), "Which AI writes your personas?");
+  const brain = await resolveBrain(parseCommon(rest), "Which AI writes your personas?", "personagen");
 
   const flagValue = (name: string): string | undefined => {
     const i = rest.indexOf(name);
@@ -2296,6 +2339,7 @@ const VALUE_FLAGS = new Set([
   "--time",
   "--flow",
   "--model",
+  "--model-for",
   "--effort",
   "--stop",
   "--new-persona",

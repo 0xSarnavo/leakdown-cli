@@ -1,5 +1,5 @@
 import { makeCliBrain } from "./cli-brain.js";
-import type { BrainRole } from "../roles.js";
+import { toolPolicy, type BrainRole } from "../roles.js";
 
 interface ClaudeJsonOutput {
   result?: string;
@@ -34,7 +34,7 @@ const EXPERT_DISALLOWED = [
 ];
 
 export function createClaudeBrain(role: BrainRole = "persona") {
-  const disallowed = role === "expert" ? EXPERT_DISALLOWED : PERSONA_DISALLOWED;
+  const disallowed = toolPolicy(role) === "expert" ? EXPERT_DISALLOWED : PERSONA_DISALLOWED;
   return makeCliBrain({
     name: "claude",
     // --add-dir opts the session dir in, so Read reaches the screenshots
